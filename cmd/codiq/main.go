@@ -1,4 +1,4 @@
-// Command codiq indexes a repository into the CodiQ graph (SPEC.md §14 M2).
+// Command codiq indexes a repository into the CodiQ graph (SPEC.md §14 M2, M3).
 //
 // It is a one-shot program: it walks the tree, parses every file it has a
 // parser for, replaces that file's rows, rebuilds the cross-file edges, and
@@ -6,7 +6,16 @@
 // on every push, and it is what the `codiq` service in deploy/docker-compose.yml
 // runs.
 //
-//	codiq [-dsn URL] [-v] [repo]
+// Since M3 the run is a DBOS workflow (index/dbos.go), so it is also
+// crash-resumable: every stage is checkpointed into a second database, and a
+// process that dies mid-index is finished rather than redone by the next one.
+// That makes this file responsible for two databases and one lifecycle —
+// NewDBOSContext, Register, Launch, run, Shutdown — and for the distinction
+// between a run whose process was killed and one this program stopped on
+// purpose, which leave the workflow in different states and are picked up again
+// by different calls (see durable and start).
+//
+//	codiq [-dsn URL] [-dbos-dsn URL] [-v] [repo]
 //
 // Wiring lives here and only here (SPEC.md §12: plain Go, packages grouped by
 // what they do, wired in main). The flag package is the whole CLI surface — one
@@ -20,11 +29,14 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"log/slog"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"syscall"
 	"time"
 
+	"github.com/dbos-inc/dbos-transact-golang/dbos"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/gaarutyunov/codiq/index"
@@ -36,11 +48,32 @@ import (
 // distinct because the two programs are (read/write separation, SPEC.md §2.3).
 const dsnEnv = "CODIQ_DATABASE_URL"
 
+// dbosDSNEnv is the *other* connection string: DBOS's own system database
+// (SPEC.md §9, §10). It is a separate database on the same instance —
+// `codiq_dbos`, created by deploy/initdb/01-dbos.sql — so that checkpointing
+// every step of a run never contends with the bulk writes that run is making
+// into the graph tables. Nothing but DBOS ever opens it.
+const dbosDSNEnv = "DBOS_DATABASE_URL"
+
+// shutdownTimeout is how long Shutdown is given to wind the workflow down before
+// the process stops waiting for it.
+//
+// A step here is one file's parse and one short transaction, so this is orders
+// of magnitude more than the common case needs; the size is for the pathological
+// one — a step blocked on a lock — where the right answer is still to stop and
+// let the next run continue from the checkpoints that did land.
+const shutdownTimeout = 30 * time.Second
+
 func main() {
 	// SIGINT/SIGTERM cancel the context rather than killing the process, so an
 	// interrupted run stops between transactions instead of inside one. Each
-	// file's load is already atomic, so what is on disk stays consistent; the
-	// cross-file edges are simply not rebuilt, which the next run does.
+	// file's load is already atomic, so what is on disk stays consistent.
+	//
+	// Since M3 this context stops the *process*; the run it was in the middle of
+	// is checkpointed, and the next invocation continues it from there rather
+	// than starting over. durable, await and start are where that is arranged,
+	// and why an interrupted run and a crashed one get back in by different
+	// doors.
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
@@ -56,6 +89,7 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) error {
 	fs := flag.NewFlagSet("codiq", flag.ContinueOnError)
 	fs.SetOutput(stderr)
 	dsn := fs.String("dsn", "", "PostgreSQL connection string (default $"+dsnEnv+")")
+	dbosDSN := fs.String("dbos-dsn", "", "DBOS checkpoint connection string (default $"+dbosDSNEnv+")")
 	verbose := fs.Bool("v", false, "print the parse error behind every skipped file")
 	fs.Usage = func() {
 		_, _ = fmt.Fprintf(stderr, "usage: codiq [flags] [repo]\n\n"+
@@ -82,6 +116,22 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) error {
 	if *dsn == "" {
 		return fmt.Errorf("no database: pass -dsn or set %s", dsnEnv)
 	}
+	if *dbosDSN == "" {
+		*dbosDSN = os.Getenv(dbosDSNEnv)
+	}
+	if *dbosDSN == "" {
+		return fmt.Errorf("no checkpoint database: pass -dbos-dsn or set %s", dbosDSNEnv)
+	}
+
+	// The workflow's input is the absolute path, not what was typed. It is what
+	// identifies the run in the checkpoint tables, so `codiq .` and `codiq /repo`
+	// from the same directory have to be the same run — otherwise resuming an
+	// interrupted index depends on how it was spelled the first time. The
+	// original spelling is still what gets reported.
+	target, err := filepath.Abs(repo)
+	if err != nil {
+		return fmt.Errorf("%s: %w", repo, err)
+	}
 
 	pool, err := open(ctx, *dsn)
 	if err != nil {
@@ -89,14 +139,158 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) error {
 	}
 	defer pool.Close()
 
+	dctx, err := durable(ctx, *dbosDSN, stderr)
+	if err != nil {
+		return err
+	}
+	// Registration and launch are separate for one reason: Launch recovers this
+	// executor's unfinished workflows, so everything they need has to already be
+	// registered when it runs.
+	index.Register(dctx, pool)
+	if err := dbos.Launch(dctx); err != nil {
+		return fmt.Errorf("dbos: launch: %w", err)
+	}
+	defer dbos.Shutdown(dctx, shutdownTimeout)
+
+	h, resumed, err := start(dctx, target)
+	if err != nil {
+		return err
+	}
+	if resumed {
+		_, _ = fmt.Fprintf(stderr, "codiq: continuing unfinished index %s\n", h.GetWorkflowID())
+	}
+
 	started := time.Now()
-	res, err := index.Run(ctx, pool, repo)
+	res, err := await(ctx, h)
 	// A run that failed before it resolved a coordinate has nothing to report
 	// that its error does not already say.
 	if !res.Coord.IsZero() {
 		report(stdout, repo, res, time.Since(started), *verbose)
 	}
 	return err
+}
+
+// durable builds the DBOS context the run is orchestrated by.
+//
+// The context is context.WithoutCancel, so the signal context that stops this
+// process does not reach DBOS on its own. That does not spare the workflow —
+// dbos.Shutdown cancels the DBOS context as its first act, so the deferred
+// Shutdown ends an interrupted run as CANCELLED either way (measured; it is not
+// a "let the current step land" operation). What WithoutCancel buys is that the
+// cancellation happens *once*, at a known point, after await has stopped waiting
+// and reported — instead of racing await the instant Ctrl-C is pressed.
+//
+// CANCELLED is where the crash path and the interrupt path diverge, and start is
+// where they are put back together: a crashed run is left PENDING and Launch
+// restarts it by itself, while a cancelled one is invisible to recovery and has
+// to be resumed explicitly. Both end up resuming from the same checkpoints.
+//
+// The logger goes to stderr because stdout is the report, and a caller piping
+// one should not have to filter the other out of it.
+func durable(ctx context.Context, dsn string, stderr io.Writer) (dbos.DBOSContext, error) {
+	dctx, err := dbos.NewDBOSContext(context.WithoutCancel(ctx), dbos.Config{
+		AppName:     "codiq",
+		DatabaseURL: dsn,
+		// Pinned, not the default hash of this binary: see index.WorkflowVersion
+		// for why the default makes a redeploy lose every workflow it inherits.
+		ApplicationVersion: index.WorkflowVersion,
+		Logger:             slog.New(slog.NewTextHandler(stderr, &slog.HandlerOptions{Level: slog.LevelInfo})),
+	})
+	if err != nil {
+		return nil, fmt.Errorf("bad %s: %w", dbosDSNEnv, err)
+	}
+	return dctx, nil
+}
+
+// start picks up this repository's unfinished index if it has one, and starts a
+// new one otherwise. The bool reports which happened.
+//
+// Both halves are necessary and they pull in opposite directions. Indexing is
+// idempotent and meant to be re-run — on every push — so the workflow ID cannot
+// be a pure function of the repository, or the second run would hand back the
+// first run's checkpointed result and index nothing. But a run that did not
+// finish has to be *finished*, not redone: starting a second workflow beside it
+// would index the same tree twice, concurrently, which is not merely wasteful.
+// Two indexers over one corpus race in the link pass — measured, as a foreign
+// key violation out of link.RebuildAll — because rebuilding the derived edges is
+// a whole-graph operation and the other run is still replacing the rows it reads.
+//
+// Unfinished comes in two shapes, and they need different verbs:
+//
+//   - PENDING is a run whose process died. dbos.Launch has already restarted it
+//     in the background by the time this is called, so the work here is only to
+//     find it and attach to the running thing rather than start a rival.
+//   - CANCELLED is a run this program stopped on purpose, on Ctrl-C (see
+//     durable). Recovery does not look at cancelled workflows at all, so this one
+//     has to be handed back to the runtime explicitly. It restarts from the same
+//     checkpoints; only the way it is reached differs.
+func start(dctx dbos.DBOSContext, target string) (dbos.WorkflowHandle[index.Result], bool, error) {
+	// Listed on the workflow ID rather than the recorded input; index.RunIDPrefix
+	// documents why that distinction is load-bearing. The oldest match wins,
+	// which is what the default ordering gives: if more than one run was left
+	// unfinished, the one that has been waiting longest is the one to finish, and
+	// the next invocation picks up the next.
+	for _, c := range []struct {
+		status dbos.WorkflowStatusType
+		pick   func(dbos.DBOSContext, string) (dbos.WorkflowHandle[index.Result], error)
+	}{
+		{dbos.WorkflowStatusPending, dbos.RetrieveWorkflow[index.Result]},
+		{dbos.WorkflowStatusEnqueued, dbos.RetrieveWorkflow[index.Result]},
+		{dbos.WorkflowStatusCancelled, func(ctx dbos.DBOSContext, id string) (dbos.WorkflowHandle[index.Result], error) {
+			return dbos.ResumeWorkflow[index.Result](ctx, id)
+		}},
+	} {
+		found, err := dbos.ListWorkflows(dctx,
+			dbos.WithWorkflowIDPrefix(index.RunIDPrefix(target)),
+			dbos.WithStatus([]dbos.WorkflowStatusType{c.status}),
+		)
+		if err != nil {
+			return nil, false, fmt.Errorf("dbos: list workflows: %w", err)
+		}
+		if len(found) == 0 {
+			continue
+		}
+		h, err := c.pick(dctx, found[0].ID)
+		if err != nil {
+			return nil, false, fmt.Errorf("dbos: resume %s: %w", found[0].ID, err)
+		}
+		return h, true, nil
+	}
+
+	h, err := dbos.RunWorkflow(dctx, index.IndexRepo, target, dbos.WithWorkflowID(index.NewRunID(target)))
+	if err != nil {
+		return nil, false, fmt.Errorf("dbos: %w", err)
+	}
+	return h, false, nil
+}
+
+// await waits for the workflow to finish, or for this process to be interrupted,
+// whichever comes first.
+//
+// GetResult has no context, so the wait is a goroutine and a select. All the
+// signal path does here is stop waiting; ending the workflow is the deferred
+// Shutdown's job, and it ends it as CANCELLED. That is not a lost run — its
+// checkpoints are already on disk and the next invocation resumes it — but it is
+// a different door back in from the one a crash uses, so the message says the
+// run continues rather than implying it was never stopped. durable and start
+// carry the rest of the reasoning.
+func await(ctx context.Context, h dbos.WorkflowHandle[index.Result]) (index.Result, error) {
+	type outcome struct {
+		res index.Result
+		err error
+	}
+	done := make(chan outcome, 1)
+	go func() {
+		res, err := h.GetResult()
+		done <- outcome{res: res, err: err}
+	}()
+
+	select {
+	case o := <-done:
+		return o.res, o.err
+	case <-ctx.Done():
+		return index.Result{}, fmt.Errorf("interrupted: index %s is checkpointed and continues on the next run", h.GetWorkflowID())
+	}
 }
 
 // open dials Postgres and proves the connection works before any indexing

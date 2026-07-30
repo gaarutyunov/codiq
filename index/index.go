@@ -112,12 +112,19 @@ func DefaultConcurrency() int { return max(runtime.GOMAXPROCS(0), 1) }
 // failure aborts the run, and the link pass does not run. That asymmetry is the
 // point: a bad file is data, and a failed insert is not.
 func Run(ctx context.Context, db DB, repo string) (Result, error) {
+	return defaultLoader().run(ctx, db, repo)
+}
+
+// defaultLoader is the real thing: the real extractor registry, the real store,
+// the real link pass. Run and the DBOS workflow (dbos.go) both need it, and a
+// second literal is a second place for the two to drift apart.
+func defaultLoader() loader {
 	return loader{
 		parserFor: extract.ParserFor,
 		load:      store.ReplaceFile,
 		relink:    link.RebuildAll,
 		limit:     DefaultConcurrency(),
-	}.run(ctx, db, repo)
+	}
 }
 
 // loader is Run's dependencies, named so a test can substitute them.
