@@ -117,13 +117,13 @@ Feature: The CodiQ core model, served over MCP
   Scenario: Lexical containment is one relationship spanning two tables
     Given the demo corpus is seeded
     When the graph is matched on the "contains" relationship
-    Then it yields 13 edges
+    Then it yields 17 edges
     And 2 of them lead to a scope
-    And 11 of them lead to an occurrence
+    And 15 of them lead to an occurrence
 
   # A traversal is an inner join, not an outer one: an occurrence with no
   # outgoing call is absent from the result rather than present with an empty
-  # list. Seven definitions are seeded and exactly one of them calls anything, so
+  # list. Ten definitions are seeded and exactly one of them calls anything, so
   # a single row coming back is the whole behaviour. Recorded because it is the
   # trap in every query written against this model — "no results" can mean the
   # deepest hop is missing, not the shallowest.

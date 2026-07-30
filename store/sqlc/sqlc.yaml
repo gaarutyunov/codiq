@@ -1,0 +1,46 @@
+# sqlc configuration for the CodiQ loader (SPEC.md §6, §14 M2).
+#
+# `schema` points at the committed goose migrations rather than a hand-kept
+# DDL copy: SPEC.md §4.1 makes the SDL the source and the migrations its only
+# emitted DDL, so anything sqlc models here is by construction the schema that
+# is actually deployed. sqlc understands the `-- +goose Up` / `-- +goose Down`
+# markers and folds only the Up sections into its catalog.
+#
+# Only 0001 is listed. 0002 creates the read-only SQL/PGQ property-graph view
+# (`CREATE PROPERTY GRAPH`, SPEC.md §4.5) — PostgreSQL 19 syntax that sqlc's
+# PostgreSQL 17 parser cannot read, and which the loader must never write to
+# anyway. The tables 0001 declares are the complete write surface.
+#
+# Regenerate with, from the repository root:
+#
+#     go install github.com/sqlc-dev/sqlc/cmd/sqlc@v1.30.0
+#     sqlc generate -f store/sqlc/sqlc.yaml
+#
+# The version is pinned here because the generated files are committed and CI
+# does not regenerate them: a different sqlc would produce a diff nobody asked
+# for. Promoting sqlc to a `go get -tool` dependency would pin it in go.mod
+# instead, at the cost of dragging its whole build tree into this module's graph.
+#
+version: "2"
+sql:
+  - engine: postgresql
+    schema: ../../schema/migrations/0001_core_tables.sql
+    queries: query.sql
+    gen:
+      go:
+        package: sqlc
+        out: "."
+        sql_package: pgx/v5
+        emit_empty_slices: true
+        emit_pointers_for_null_types: true
+        overrides:
+          # Every id in the schema is a uuid; google/uuid is already in the
+          # module graph and reads better at call sites than pgtype.UUID.
+          - db_type: uuid
+            go_type: github.com/google/uuid.UUID
+          - db_type: uuid
+            nullable: true
+            go_type:
+              import: github.com/google/uuid
+              type: UUID
+              pointer: true

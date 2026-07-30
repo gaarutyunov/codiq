@@ -1,13 +1,15 @@
 # CodiQ — local runtime (SPEC.md §11.1).
 #
-# M1 is postgres + gopgql and nothing else: the SDL is the product, gopgql owns
-# the schema and the read surface, and rows are inserted by hand. The `codiq`
-# ingestion service arrives at M2 and the shared `artifacts` volume becomes
-# relevant at M5; both are stubbed out below so they slot in without a reshuffle.
+# M1 was postgres + gopgql and nothing else: the SDL is the product, gopgql owns
+# the schema and the read surface, and rows were inserted by hand. M2 adds the
+# `codiq` ingestion service, which is where rows start coming from source code.
+# The shared `artifacts` volume becomes relevant at M5 and is stubbed out below
+# so it slots in without a reshuffle.
 #
 #   postgres   PostgreSQL 19 with SQL/PGQ. The only stateful piece.
 #   migrate    one-shot: applies schema/migrations/ with goose, then exits.
 #   seed       one-shot: loads the demo corpus once the schema exists.
+#   codiq      one-shot: indexes a repository into the schema, then exits.
 #   mcp        long-running: serves the graph over GraphQL/MCP on HTTP.
 #
 # Run it from the repository root:
@@ -64,7 +66,12 @@ services:
       # Runs once, on an empty data directory only.
       - ./initdb:/docker-entrypoint-initdb.d:ro
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U codiq -d codiq"]
+      # --host 127.0.0.1 on purpose. The default is the unix socket, and initdb
+      # runs a temporary server on that socket before the real one binds TCP, so a
+      # socket probe can go green while the port is still refusing connections —
+      # which is `migrate` failing with "connection refused" on a cold volume.
+      # Probing over TCP is probing the thing every other service connects to.
+      test: ["CMD-SHELL", "pg_isready --host 127.0.0.1 -U codiq -d codiq"]
       interval: 2s
       timeout: 3s
       retries: 30
@@ -107,6 +114,54 @@ services:
     # $$ escapes compose's own interpolation so the shell expands it.
     command: ["sh", "-c", "psql \"$$CODIQ_DATABASE_URL\" -v ON_ERROR_STOP=1 -q -f /seed/seed.sql"]
 
+  # Ingestion (§14 M2): the monolithic loader. It walks a repository, parses each
+  # supported file with gotreesitter on a pool of goroutines, replaces that
+  # file's rows, and rebuilds the cross-file edges once at the end.
+  #
+  # One-shot, like `seed`, and for a stronger reason than symmetry: replacing a
+  # file's rows is idempotent and the link rebuild is a pure function of the base
+  # facts, so indexing is a thing you *finish*, not a thing you leave running.
+  # Re-run it after a change with `docker compose run --rm codiq`; a watch loop
+  # is M3's, once DBOS makes a run crash-resumable.
+  #
+  # The corpus is §14 M2's own acceptance fixture: the two-file module where
+  # `main` calls a `Greeter` defined in the other file. So `up` yields the
+  # cross-file edge the milestone is about, from a corpus small enough to read.
+  #
+  # Not CodiQ's own source, which is the obvious choice and the wrong one. A
+  # corpus boundary is not modelled in M1 (schema/codiq.graphql on `file.path`:
+  # "uniqueness of a path is a property of a *corpus*, and the corpus boundary is
+  # not modelled"), so `file` rows are keyed by path alone across every corpus in
+  # the database — and deploy/seed/seed.sql's demo corpus contains
+  # `cmd/codiq/main.go`, a path this repository really has. Indexing the repo
+  # therefore *replaces* that seeded file's rows, and the demo's
+  # `cmd/codiq/main.go ──imports──▶ internal/graph/store.go` edge disappears
+  # (measured, not assumed). The fixture's module is `github.com/foo/bar` and its
+  # paths are `main.go`/`greeter.go`, so it collides with nothing.
+  #
+  # Index something else by overriding the volume: the binary takes any directory
+  # inside a module it can resolve a coordinate for.
+  #
+  #   docker compose -f deploy/docker-compose.yml run --rm \
+  #     -v "$PWD:/src:ro" codiq codiq /src
+  #
+  # After `seed` rather than after `migrate`, even though only the schema is
+  # strictly required: both services write, and the demo corpus and the indexed
+  # graph only coexist deterministically if the seeded rows are already in place
+  # when the link rebuild runs over them.
+  codiq:
+    build:
+      context: ..
+      dockerfile: deploy/codiq.Dockerfile
+    depends_on:
+      seed:
+        condition: service_completed_successfully
+    environment:
+      CODIQ_DATABASE_URL: *codiq-database-url
+    volumes:
+      - ../extract/golang/testdata/greeter:/repo:ro
+    command: ["codiq", "/repo"]
+
   # The read surface (§8): GraphQL compiled to SQL/PGQ, served over MCP. CodiQ
   # builds no MCP layer of its own. The server never writes — its pool opens
   # with default_transaction_read_only=on — so the ingestion path stays the only
@@ -136,20 +191,14 @@ services:
 
   # --- Not yet ---------------------------------------------------------------
   #
-  # M2 adds the ingestion service (§14 M2): a single program that parses files
-  # with gotreesitter and inserts into this schema. M3 gives it DBOS, which is
-  # where DBOS_DATABASE_URL starts being read. M5 adds the protobuf artifacts on
-  # a shared volume (§10) — the local stand-in for the ReadWriteMany PVC that
-  # replaces it under Kubernetes (§16).
+  # M3 wraps the `codiq` loop in a DBOS workflow, which is where
+  # DBOS_DATABASE_URL starts being read. M5 adds the protobuf artifacts on a
+  # shared volume (§10) — the local stand-in for the ReadWriteMany PVC that
+  # replaces it under Kubernetes (§16). Both are additions to the `codiq`
+  # service above, not new services:
   #
   # codiq:
-  #   build:
-  #     context: ..
-  #   depends_on:
-  #     migrate:
-  #       condition: service_completed_successfully
   #   environment:
-  #     CODIQ_DATABASE_URL: *codiq-database-url
   #     DBOS_DATABASE_URL: *dbos-database-url    # from M3
   #     CODIQ_ARTIFACT_DIR: /artifacts           # from M5
   #   volumes:
