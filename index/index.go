@@ -170,7 +170,7 @@ func (l loader) run(ctx context.Context, db DB, repo string) (Result, error) {
 			if err != nil {
 				return err
 			}
-			err, retries := l.loadWithRetry(gctx, db, ff)
+			retries, err := l.loadWithRetry(gctx, db, ff)
 			switch {
 			case err == nil:
 				mu.Lock()
@@ -232,15 +232,15 @@ const maxLoadAttempts = 5
 // operation is a replace, so doing it again is doing it for the first time. A
 // short staggered backoff is what stops the two from colliding again, since the
 // victim is chosen at random rather than by age.
-func (l loader) loadWithRetry(ctx context.Context, db DB, ff facts.FileFacts) (error, int) {
+func (l loader) loadWithRetry(ctx context.Context, db DB, ff facts.FileFacts) (int, error) {
 	for attempt := 1; ; attempt++ {
 		err := l.load(ctx, db, ff)
 		if err == nil || attempt == maxLoadAttempts || !serializationFailure(err) {
-			return err, attempt - 1
+			return attempt - 1, err
 		}
 		select {
 		case <-ctx.Done():
-			return ctx.Err(), attempt - 1
+			return attempt - 1, ctx.Err()
 		case <-time.After(time.Duration(attempt) * 20 * time.Millisecond):
 		}
 	}

@@ -251,7 +251,7 @@ func (b *builder) collectScopes(matches []ts.QueryMatch) {
 func (b *builder) enclosingScope(start, end uint32) facts.LocalID {
 	best := facts.NoID
 	var bestStart uint32
-	var bestEnd uint32 = ^uint32(0)
+	bestEnd := ^uint32(0)
 	for _, s := range b.scopes {
 		if s.start > start || s.end < end {
 			continue
@@ -649,7 +649,7 @@ func (b *builder) typeSuffix(typeName string) (coord.Coord, string) {
 func (b *builder) lookup(name string, pos uint32) (defRec, bool) {
 	var best defRec
 	var bestStart uint32
-	var bestEnd uint32 = ^uint32(0)
+	bestEnd := ^uint32(0)
 	found := false
 	for _, d := range b.defsByName[name] {
 		start, end, ok := b.scopeRange(d.scope)

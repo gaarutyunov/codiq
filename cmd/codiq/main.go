@@ -58,7 +58,7 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) error {
 	dsn := fs.String("dsn", "", "PostgreSQL connection string (default $"+dsnEnv+")")
 	verbose := fs.Bool("v", false, "print the parse error behind every skipped file")
 	fs.Usage = func() {
-		fmt.Fprintf(stderr, "usage: codiq [flags] [repo]\n\n"+
+		_, _ = fmt.Fprintf(stderr, "usage: codiq [flags] [repo]\n\n"+
 			"Index a repository into the CodiQ graph. repo defaults to the working\n"+
 			"directory and must be inside a module CodiQ can resolve a package\n"+
 			"coordinate for (go.mod).\n\nflags:\n")
@@ -133,29 +133,29 @@ func open(ctx context.Context, dsn string) (*pgxpool.Pool, error) {
 // whole reason a poison file does not fail the run (SPEC.md §5) is that it is
 // visible instead. -v adds the parse error behind each one.
 func report(w io.Writer, repo string, res index.Result, elapsed time.Duration, verbose bool) {
-	fmt.Fprintf(w, "codiq: %s\n", repo)
-	fmt.Fprintf(w, "  coordinate  %s\n", res.Coord.Prefix())
-	fmt.Fprintf(w, "  workers     %d\n", res.Concurrency)
-	fmt.Fprintf(w, "  files       %d\n", res.Files)
-	fmt.Fprintf(w, "  loaded      %d in %s\n", res.Loaded, elapsed.Round(time.Millisecond))
+	_, _ = fmt.Fprintf(w, "codiq: %s\n", repo)
+	_, _ = fmt.Fprintf(w, "  coordinate  %s\n", res.Coord.Prefix())
+	_, _ = fmt.Fprintf(w, "  workers     %d\n", res.Concurrency)
+	_, _ = fmt.Fprintf(w, "  files       %d\n", res.Files)
+	_, _ = fmt.Fprintf(w, "  loaded      %d in %s\n", res.Loaded, elapsed.Round(time.Millisecond))
 	if res.Retries > 0 {
 		// Not a warning: two files that reference each other contend on the
 		// cross-file edges they share, and one of them backs off and wins.
-		fmt.Fprintf(w, "  retried     %d file loads after a serialization failure\n", res.Retries)
+		_, _ = fmt.Fprintf(w, "  retried     %d file loads after a serialization failure\n", res.Retries)
 	}
 
 	if len(res.Skipped) == 0 {
 		return
 	}
-	fmt.Fprintf(w, "  skipped     %d unparseable (previous facts left in place)\n", len(res.Skipped))
+	_, _ = fmt.Fprintf(w, "  skipped     %d unparseable (previous facts left in place)\n", len(res.Skipped))
 	for _, s := range res.Skipped {
 		if verbose {
-			fmt.Fprintf(w, "                %s: %v\n", s.Path, s.Err)
+			_, _ = fmt.Fprintf(w, "                %s: %v\n", s.Path, s.Err)
 			continue
 		}
-		fmt.Fprintf(w, "                %s\n", s.Path)
+		_, _ = fmt.Fprintf(w, "                %s\n", s.Path)
 	}
 	if !verbose {
-		fmt.Fprintf(w, "              re-run with -v for the parse errors\n")
+		_, _ = fmt.Fprintf(w, "              re-run with -v for the parse errors\n")
 	}
 }

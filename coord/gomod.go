@@ -38,7 +38,7 @@ func FromGoMod(dir string) (Coord, error) {
 	if err != nil {
 		return Coord{}, err
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 
 	module, err := scanModulePath(f)
 	if err != nil {
