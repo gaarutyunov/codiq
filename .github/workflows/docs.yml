@@ -1,0 +1,108 @@
+# The landing / docs / demo site (SPEC.md §11.2): GitHub Pages in branch mode,
+# with a live preview on every PR.
+#
+# One workflow, two deploy paths, because the two triggers need different
+# permissions and different concurrency and a single job cannot honestly claim
+# both. `push` publishes to gh-pages; `pull_request` publishes a preview under
+# gh-pages:/pr-preview/pr-<N>/ and cleans it up when the PR closes.
+name: docs
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'docs/**'
+      - '.github/workflows/docs.yml'
+  pull_request:
+    types: [opened, reopened, synchronize, closed]
+    paths:
+      - 'docs/**'
+      - '.github/workflows/docs.yml'
+
+# Least privilege per job; nothing here needs more than write access to the
+# repository's own contents, plus the PR comment the preview action leaves.
+permissions:
+  contents: read
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # main -> https://gaarutyunov.github.io/codiq/
+  # ---------------------------------------------------------------------------
+  deploy:
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    concurrency:
+      group: docs-deploy
+      cancel-in-progress: true
+    steps:
+      - uses: actions/checkout@v4
+
+      # Astro 5 requires Node >= 20.19; 22 is the current LTS line and what the
+      # site is developed against.
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: docs/package-lock.json
+
+      - name: install and build
+        run: |
+          npm ci
+          npm run build
+        working-directory: docs
+        env:
+          # The project-Pages subpath. If a custom domain is configured for Pages
+          # later, this becomes "/" — see docs/astro.config.mjs.
+          BASE_PATH: /codiq/
+
+      - uses: peaceiris/actions-gh-pages@v4
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          publish_branch: gh-pages
+          publish_dir: ./docs/dist
+          # The PR previews live on the same branch under pr-preview/. Without
+          # this, publishing main would delete every open PR's preview.
+          keep_files: true
+
+  # ---------------------------------------------------------------------------
+  # pull request -> https://gaarutyunov.github.io/codiq/pr-preview/pr-<N>/
+  # ---------------------------------------------------------------------------
+  preview:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+    # Serialize preview deployments per PR: two pushes in quick succession would
+    # otherwise race for the same directory on gh-pages.
+    concurrency: docs-preview-${{ github.ref }}
+    steps:
+      - uses: actions/checkout@v4
+
+      # On `closed` the preview action only removes the directory, so the build
+      # steps are skipped entirely.
+      - uses: actions/setup-node@v4
+        if: github.event.action != 'closed'
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: docs/package-lock.json
+
+      - name: install and build
+        if: github.event.action != 'closed'
+        run: |
+          npm ci
+          npm run build
+        working-directory: docs
+        env:
+          # The preview is served from a deeper subpath than the site itself, so
+          # the base has to include it or every asset URL 404s.
+          BASE_PATH: /codiq/pr-preview/pr-${{ github.event.number }}/
+
+      - name: deploy preview
+        uses: rossjrw/pr-preview-action@v1
+        with:
+          source-dir: ./docs/dist
+          action: auto

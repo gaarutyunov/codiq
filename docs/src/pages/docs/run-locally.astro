@@ -1,0 +1,183 @@
+---
+import Doc from '../../layouts/Doc.astro'
+import Code from '../../components/Code.astro'
+import { url } from '../../lib/url.js'
+---
+
+<Doc
+  title="Run it locally"
+  eyebrow="§11.1"
+  description="Docker Compose brings up PostgreSQL 19, applies the committed migrations, loads the seed, and serves the graph over MCP."
+>
+  <Code
+    label="From the repository root"
+    prompt="$"
+    code={`docker compose -f deploy/docker-compose.yml up -d --build`}
+  />
+  <p>
+    The build context is the repository root, so <code>schema/</code> is
+    reachable; run it from anywhere else and the mounts will not resolve. Tear it
+    down, database included, with:
+  </p>
+  <Code prompt="$" code={`docker compose -f deploy/docker-compose.yml down -v`} />
+
+  <h2>What comes up</h2>
+  <ga-table
+    columns='[{"label":"Service","mono":true,"width":"120px"},{"label":"Kind","width":"110px"},{"label":"What it does"}]'
+  >
+    <div>
+      <code>postgres</code>
+      <span class="muted">long-running</span>
+      <span>
+        <code>postgres:19beta2</code>, pinned to the same tag gopgql targets.
+        SQL/PGQ is a PostgreSQL 19 feature; there is no fallback on 18. Published
+        on loopback only.
+      </span>
+    </div>
+    <div>
+      <code>migrate</code>
+      <span class="muted">one-shot</span>
+      <span>
+        Applies <code>schema/migrations/</code> with goose, then exits. Everything
+        downstream waits on it completing successfully.
+      </span>
+    </div>
+    <div>
+      <code>seed</code>
+      <span class="muted">one-shot</span>
+      <span>
+        Loads <code>deploy/seed/seed.sql</code>. The only writer M1 has, and the
+        one service that goes away at M2.
+      </span>
+    </div>
+    <div>
+      <code>mcp</code>
+      <span class="muted">long-running</span>
+      <span>
+        <code>gopgql-mcp --sdl /schema/codiq.graphql</code> on
+        <code>127.0.0.1:8080</code>, with <code>/healthz</code> next to
+        <code>/mcp</code>.
+      </span>
+    </div>
+  </ga-table>
+
+  <h2>Ports and credentials</h2>
+  <Code
+    code={`postgres   127.0.0.1:5432    codiq / codiq / codiq
+mcp        127.0.0.1:8080/mcp
+           127.0.0.1:8080/healthz`}
+  />
+  <p class="muted">
+    Both are bound to loopback on purpose: an example database with example
+    credentials has no business being reachable from the network.
+  </p>
+
+  <ga-note tone="warning" title="The connection-string variable is GOPGQL_DSN">
+    SPEC.md §11.1 shows <code>GOPGQL_DATABASE_URL</code>. The binaries do not read
+    that — both <code>gopgql</code> and <code>gopgql-mcp</code> read
+    <code>GOPGQL_DSN</code>, and the compose file binds the one connection string
+    to that name. <code>CODIQ_DATABASE_URL</code> is the separate name §11.1 gives
+    the same value for CodiQ's own ingestion service, which arrives at M2; the
+    <code>seed</code> service reads it today. Setting only
+    <code>GOPGQL_DATABASE_URL</code> gets you a server that cannot find the
+    database.
+  </ga-note>
+
+  <h2>Talking to the property graph directly</h2>
+  <p>
+    The <code>CREATE PROPERTY GRAPH</code> view is named <code>app_graph</code> —
+    gopgql's default, with no flag to change it. You need the name only for
+    hand-written SQL/PGQ; the GraphQL surface never mentions it.
+  </p>
+  <Code
+    code={`SELECT * FROM GRAPH_TABLE(app_graph
+  MATCH (o IS occurrence)
+  COLUMNS (o.name, o.role, o.descriptor)
+) LIMIT 5;`}
+  />
+
+  <h2>Check it came up</h2>
+  <Code
+    prompt="$"
+    code={`docker compose -f deploy/docker-compose.yml ps -a
+
+SERVICE    STATE     STATUS
+mcp        running   Up 25 seconds (healthy)
+migrate    exited    Exited (0) 28 seconds ago
+postgres   running   Up About a minute (healthy)
+seed       exited    Exited (0) 26 seconds ago`}
+  />
+  <p>
+    <code>migrate</code> and <code>seed</code> exiting <code>0</code> is the
+    success case — they are one-shot jobs, not services that died. The migration
+    log names both files:
+  </p>
+  <Code
+    code={`migrate-1  | OK   0001_core_tables.sql (111.4ms)
+migrate-1  | OK   0002_core_graph.sql (109.98ms)
+migrate-1  | goose: successfully migrated database to version: 2
+migrate-1  | gopgql: applied /migrations`}
+  />
+
+  <h2>Point an agent at it</h2>
+  <Code
+    label=".mcp.json"
+    code={`{
+  "mcpServers": {
+    "codiq": {
+      "type": "http",
+      "url": "http://127.0.0.1:8080/mcp"
+    }
+  }
+}`}
+  />
+  <p>
+    The server is long-running and speaks streamable HTTP, so several agents can
+    share one process. It exposes two tools — <code>introspect</code>, for
+    finding out what is queryable without touching the database, and
+    <code>query</code>, for running a GraphQL operation against it. See
+    <a href={url('/demo/')}>the demo</a> for five worked exchanges against the
+    corpus this seed loads.
+  </p>
+
+  <h2>Talking to Postgres directly</h2>
+  <p>
+    M1 has no ingestion pipeline, so inserting rows by hand is the supported way
+    to get data in — that is what the seed does.
+  </p>
+  <Code
+    prompt="$"
+    code={`psql postgres://codiq:codiq@127.0.0.1:5432/codiq
+
+codiq=# \\dt
+codiq=# SELECT path, lang, pkg_name FROM file;
+codiq=# SELECT role, symbol_kind, name, descriptor FROM occurrence ORDER BY file_id, range_start;`}
+  />
+  <p class="muted">
+    Re-running the seed is a no-op rather than a duplicate corpus: it deletes
+    everything owned by its three files and rewrites it, in the same shape §6
+    gives the real reduce phase.
+  </p>
+
+  <ga-note tone="warning" title="gopgql is built from source">
+    <code>deploy/gopgql.Dockerfile</code> builds <code>gopgql</code> and
+    <code>gopgql-mcp</code> from commit <code>85a2f68</code>, because gopgql has
+    cut no <code>v*</code> tag and <code>ghcr.io/gaarutyunov/gopgql</code> does
+    not exist yet — the escape hatch §14 M1 allows. The ref is a commit rather
+    than a branch so that a rebuild is the same stack on a different day. That
+    makes the first
+    <code>--build</code> slow (it compiles two Go binaries) and subsequent ones
+    cached. Swapping to the published image later is deleting that file and
+    giving the two services an <code>image:</code> line.
+  </ga-note>
+
+  <h2>Not running yet</h2>
+  <p>
+    <code>deploy/initdb/01-dbos.sql</code> creates the <code>codiq_dbos</code>
+    database on first boot so it is there when M3 needs it; nothing reads it
+    until then. The <code>codiq</code> ingestion service and the shared
+    <code>artifacts</code> volume are commented out in the compose file, ready to
+    slot in at M2 and M5 without a reshuffle. See
+    <a href={url('/docs/pipeline/')}>the pipeline</a>.
+  </p>
+</Doc>

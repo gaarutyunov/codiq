@@ -1,0 +1,334 @@
+/* The palette, type scale and spacing all come from the vendored ui-kit tokens
+   (imported alongside this file in Base.astro). Nothing here invents a colour:
+   every value is a `--ga-*` token with the kit's own default as the fallback.
+   This file only lays the pages out around the components. */
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  min-height: 100vh;
+  background: var(--ga-bg, #000);
+  color: var(--ga-fg, #ededed);
+  font-family: var(--ga-font-sans, ui-sans-serif, system-ui, sans-serif);
+  font-size: var(--ga-fs-base, 17px);
+  line-height: var(--ga-lh-base, 1.65);
+}
+
+.wrap {
+  max-width: 1100px;
+  margin: 0 auto;
+  padding: var(--ga-space-8, 32px) var(--ga-space-6, 24px) var(--ga-space-12, 48px);
+}
+
+a {
+  color: var(--ga-accent, #54a2ff);
+}
+
+h1,
+h2,
+h3 {
+  font-family: var(--ga-font-display, monospace);
+  letter-spacing: var(--ga-tracking-tight, -0.02em);
+  line-height: var(--ga-lh-tight, 1.2);
+}
+
+h1 {
+  font-size: var(--ga-fs-3xl, 44px);
+  margin: 0 0 var(--ga-space-3, 12px);
+}
+
+h2 {
+  font-size: var(--ga-fs-xl, 24px);
+  margin: var(--ga-space-10, 40px) 0 var(--ga-space-3, 12px);
+}
+
+h3 {
+  font-size: var(--ga-fs-lg, 20px);
+  margin: var(--ga-space-6, 24px) 0 var(--ga-space-2, 8px);
+}
+
+p {
+  max-width: 74ch;
+}
+
+code {
+  font-family: var(--ga-font-mono, ui-monospace, monospace);
+  font-size: 0.92em;
+  color: var(--ga-fg, #ededed);
+  background: var(--ga-bg-elev, #1a1a1a);
+  border: 1px solid var(--ga-border, #1a1a1a);
+  border-radius: 4px;
+  padding: 1px 5px;
+}
+
+.lede {
+  color: var(--ga-muted, #878787);
+  font-size: var(--ga-fs-lg, 20px);
+  max-width: 68ch;
+}
+
+.muted {
+  color: var(--ga-muted, #878787);
+}
+
+/* ---- Header ------------------------------------------------------------- */
+
+/* ga-header renders slotted links; keep the active one at full foreground so
+   the current section is legible without touching the component's Shadow DOM. */
+ga-header a[aria-current='page'] {
+  color: var(--ga-fg, #ededed);
+}
+
+/* ---- Landing ------------------------------------------------------------ */
+
+.hero {
+  padding: var(--ga-space-10, 40px) 0 var(--ga-space-8, 32px);
+}
+
+.hero h1 {
+  font-size: var(--ga-fs-3xl, 52px);
+}
+
+.badges {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--ga-space-2, 8px);
+  margin: var(--ga-space-5, 20px) 0;
+}
+
+.cta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--ga-space-3, 12px);
+  margin-top: var(--ga-space-6, 24px);
+}
+
+.grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+  gap: var(--ga-space-4, 16px);
+  margin-top: var(--ga-space-4, 16px);
+}
+
+/* Grid rows stretch the host, but the kit's inner surface is sized by its
+   content — so a short card in a tall row leaves a gap under it. `card` is an
+   exposed part, so the fix is one rule and no reaching into the Shadow DOM. */
+.grid ga-card,
+.grid ga-card::part(card) {
+  height: 100%;
+}
+
+.grid ga-card h3 {
+  margin: 0;
+  font-size: var(--ga-fs-base, 17px);
+}
+
+.grid ga-card p {
+  margin: 0;
+  color: var(--ga-muted, #878787);
+  font-size: var(--ga-fs-sm, 14px);
+}
+
+/* ---- Pipeline strip ----------------------------------------------------- */
+
+/* The four pipeline stages, laid out as one horizontal read with an arrow
+   between the steps. Below the breakpoint it stacks and the arrows turn down. */
+.pipeline {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: var(--ga-space-3, 12px);
+  margin-top: var(--ga-space-4, 16px);
+}
+
+.stage {
+  position: relative;
+  padding: var(--ga-space-4, 16px);
+  border: 1px solid var(--ga-border, #1a1a1a);
+  border-radius: var(--ga-radius-lg, 8px);
+  background: color-mix(in srgb, var(--ga-bg-elev, #1a1a1a) 30%, transparent);
+}
+
+.stage h3 {
+  margin: var(--ga-space-2, 8px) 0 var(--ga-space-1, 4px);
+  font-size: var(--ga-fs-base, 17px);
+}
+
+.stage p {
+  margin: 0;
+  font-size: var(--ga-fs-sm, 14px);
+  color: var(--ga-muted, #878787);
+}
+
+.stage + .stage::before {
+  content: '→';
+  position: absolute;
+  left: calc(var(--ga-space-3, 12px) * -1);
+  top: var(--ga-space-4, 16px);
+  width: var(--ga-space-3, 12px);
+  text-align: center;
+  color: var(--ga-dim, #454545);
+}
+
+@media (max-width: 860px) {
+  .pipeline {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .stage + .stage::before {
+    content: '↓';
+    left: var(--ga-space-4, 16px);
+    top: calc(var(--ga-space-3, 12px) * -1);
+  }
+}
+
+/* ---- Docs layout -------------------------------------------------------- */
+
+.docs {
+  display: grid;
+  grid-template-columns: 232px minmax(0, 1fr);
+  gap: var(--ga-space-8, 32px);
+  align-items: start;
+}
+
+.sidebar {
+  position: sticky;
+  top: calc(56px + var(--ga-space-6, 24px));
+  display: flex;
+  flex-direction: column;
+  gap: var(--ga-space-1, 4px);
+  font-size: var(--ga-fs-sm, 14px);
+}
+
+.sidebar .eyebrow {
+  color: var(--ga-dim, #454545);
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  font-size: var(--ga-fs-xs, 12px);
+  margin-bottom: var(--ga-space-2, 8px);
+}
+
+.sidebar a {
+  color: var(--ga-muted, #878787);
+  text-decoration: none;
+  padding: 6px 10px;
+  border-left: 2px solid transparent;
+  border-radius: 0 var(--ga-radius, 6px) var(--ga-radius, 6px) 0;
+}
+
+.sidebar a:hover {
+  color: var(--ga-fg, #ededed);
+  background: color-mix(in srgb, var(--ga-bg-elev, #1a1a1a) 50%, transparent);
+}
+
+.sidebar a[aria-current='page'] {
+  color: var(--ga-fg, #ededed);
+  border-left-color: var(--ga-accent, #54a2ff);
+  background: color-mix(in srgb, var(--ga-bg-elev, #1a1a1a) 60%, transparent);
+}
+
+.article > :first-child {
+  margin-top: 0;
+}
+
+@media (max-width: 860px) {
+  .docs {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .sidebar {
+    position: static;
+  }
+}
+
+/* ---- Tables ------------------------------------------------------------- */
+
+/* ga-table's rows are slotted light-DOM elements; give the cells the same
+   rhythm the component's own header uses. */
+ga-table {
+  margin: var(--ga-space-4, 16px) 0;
+}
+
+ga-table > div {
+  font-size: var(--ga-fs-sm, 14px);
+}
+
+ga-table > div code {
+  background: none;
+  border: 0;
+  padding: 0;
+}
+
+/* ---- Code blocks -------------------------------------------------------- */
+
+ga-code {
+  display: block;
+  margin: var(--ga-space-3, 12px) 0;
+}
+
+ga-code::part(block) {
+  align-items: flex-start;
+}
+
+ga-code::part(text) {
+  max-height: 70vh;
+  overflow: auto;
+}
+
+.label {
+  display: block;
+  font-size: var(--ga-fs-sm, 14px);
+  font-weight: 500;
+  color: var(--ga-fg, #ededed);
+  margin-top: var(--ga-space-4, 16px);
+}
+
+/* ---- Demo --------------------------------------------------------------- */
+
+/* A demo scenario reads left to right: the request, then the recorded reply.
+   Below the breakpoint the two columns become one flow. */
+.exchange {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  gap: var(--ga-space-6, 24px);
+  align-items: start;
+  margin-top: var(--ga-space-4, 16px);
+}
+
+@media (max-width: 900px) {
+  .exchange {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+.scenario-note {
+  margin: var(--ga-space-4, 16px) 0 var(--ga-space-2, 8px);
+  display: block;
+}
+
+ga-tabs {
+  margin-top: var(--ga-space-4, 16px);
+}
+
+ga-tabs > div {
+  padding-top: var(--ga-space-5, 20px);
+}
+
+/* ---- Footer ------------------------------------------------------------- */
+
+footer.site {
+  margin-top: var(--ga-space-12, 48px);
+  padding-top: var(--ga-space-5, 20px);
+  border-top: 1px solid var(--ga-border, #1a1a1a);
+  color: var(--ga-muted, #878787);
+  font-size: var(--ga-fs-sm, 14px);
+}
+
+.next {
+  display: flex;
+  gap: var(--ga-space-3, 12px);
+  flex-wrap: wrap;
+  margin-top: var(--ga-space-8, 32px);
+  padding-top: var(--ga-space-5, 20px);
+  border-top: 1px solid var(--ga-border, #1a1a1a);
+}

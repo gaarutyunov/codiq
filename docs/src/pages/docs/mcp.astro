@@ -1,0 +1,146 @@
+---
+import Doc from '../../layouts/Doc.astro'
+import Code from '../../components/Code.astro'
+import { url } from '../../lib/url.js'
+---
+
+<Doc
+  title="Query & MCP surface"
+  eyebrow="§8"
+  description="GraphQL over MCP, compiled to SQL/PGQ by gopgql. CodiQ builds no MCP layer of its own, and the surface never writes."
+>
+  <p>
+    The read side is owned entirely by
+    <a href="https://github.com/gaarutyunov/gopgql">gopgql</a>. It reads the same
+    SDL that generated the tables, compiles GraphQL selections to PostgreSQL 19
+    <code>GRAPH_TABLE(… MATCH …)</code> queries, and serves them over MCP.
+    CodiQ contributes the model and the rows; it writes no query layer, no
+    resolver and no MCP server.
+  </p>
+
+  <h2>Three layers, one SDL</h2>
+  <ga-table
+    columns='[{"label":"Layer","width":"210px"},{"label":"Generated from the SDL by"}]'
+  >
+    <div>
+      <span>Vertex &amp; edge tables</span>
+      <span class="muted">
+        <code>gopgql generate</code> → goose migrations, applied by
+        <code>gopgql migrate</code>.
+      </span>
+    </div>
+    <div>
+      <span>Property-graph view</span>
+      <span class="muted">
+        <code>CREATE PROPERTY GRAPH app_graph</code> over those base tables,
+        mapping each edge to <code>occurrence</code>/<code>file</code> identity
+        with <code>SOURCE KEY … REFERENCES …</code> and
+        <code>DESTINATION KEY … REFERENCES …</code>. Its own migration, numbered
+        after the tables.
+      </span>
+    </div>
+    <div>
+      <span>GraphQL / MCP</span>
+      <span class="muted">
+        <code>gopgql-mcp --sdl schema/codiq.graphql</code>, over the streamable
+        HTTP transport.
+      </span>
+    </div>
+  </ga-table>
+
+  <ga-note tone="warning" title="The property graph is a read-only view">
+    <code>CREATE PROPERTY GRAPH</code> defines a view over plain vertex and edge
+    tables; all mutation is ordinary DML on those base tables. CodiQ's writes
+    never touch the view, and the MCP server's pool opens with
+    <code>default_transaction_read_only=on</code> — so ingestion stays the only
+    writer even when both share credentials. Writes are never agent-triggered.
+  </ga-note>
+
+  <h2>Query shape</h2>
+  <p>
+    gopgql derives each root field from the <em>table</em> name rather than
+    pluralising the label, and the SDL pins the table names to the singular ones
+    §4.4 uses. So the roots read <code>file</code>, <code>occurrence</code> and
+    <code>scope</code>, and every field is the camelCase name from the SDL —
+    <code>symbolKind</code>, <code>pkgName</code>, <code>resolvesTo</code>,
+    <code>calledBy</code>.
+  </p>
+  <Code
+    label="Who calls Store.Put, and from where"
+    code={`{
+  occurrence(name: "Put", role: "definition") {
+    name
+    descriptor
+    definedIn { path }
+    calledBy { name definedIn { path } }
+  }
+}`}
+  />
+
+  <p>
+    Nesting extends one <code>MATCH</code> chain rather than spawning a second
+    query, so a multi-hop traversal is still a single
+    <code>GRAPH_TABLE</code>. Argument values travel as bind parameters and are
+    never interpolated into SQL. The graph is named <code>app_graph</code> —
+    gopgql's default, and not configurable: there is no <code>--graph</code> flag
+    on <code>gopgql-mcp</code>. You only need the name to write SQL/PGQ by hand
+    against the database; the GraphQL surface never mentions it. A row with no
+    edge of the selected kind comes
+    back with an empty list rather than dropping out, so an empty
+    <code>calledBy</code> reads as "nothing calls this" and not as "no such
+    symbol".
+  </p>
+
+  <h2>Two tools</h2>
+  <ga-table
+    columns='[{"label":"Tool","mono":true,"width":"140px"},{"label":"What it is for"}]'
+  >
+    <div>
+      <code>introspect</code>
+      <span class="muted">
+        What the schema exposes, answered from the SDL without touching the
+        database. No arguments gives the overview — every root field with its
+        arguments; <code>type: "Occurrence"</code> drills into one type;
+        <code>format: "sdl"</code> returns the schema document.
+      </span>
+    </div>
+    <div>
+      <code>query</code>
+      <span class="muted">
+        Runs a GraphQL query and returns the data. Query operations only — the
+        mapped graph is read-only. Values belong in <code>variables</code>, which
+        are bound as SQL parameters. The standard introspection meta-fields
+        (<code>__schema</code>, <code>__type</code>, <code>__typename</code>)
+        work here too.
+      </span>
+    </div>
+  </ga-table>
+
+  <h2>Pointing an agent at it</h2>
+  <p>
+    The server is long-running and speaks streamable HTTP, so several agents can
+    share one process. With the stack from
+    <a href={url('/docs/run-locally/')}>run it locally</a> up, the endpoint is:
+  </p>
+  <Code code={`http://127.0.0.1:8080/mcp`} />
+  <Code
+    label=".mcp.json"
+    code={`{
+  "mcpServers": {
+    "codiq": {
+      "type": "http",
+      "url": "http://127.0.0.1:8080/mcp"
+    }
+  }
+}`}
+  />
+  <p>
+    There is a <code>/healthz</code> endpoint on the same port, which the compose
+    healthcheck uses.
+  </p>
+
+  <p>
+    <a href={url('/demo/')}>The demo</a> walks four exchanges against the seeded
+    corpus, with the responses recorded from a running server.
+  </p>
+</Doc>

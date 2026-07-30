@@ -1,0 +1,160 @@
+# CodiQ — local runtime (SPEC.md §11.1).
+#
+# M1 is postgres + gopgql and nothing else: the SDL is the product, gopgql owns
+# the schema and the read surface, and rows are inserted by hand. The `codiq`
+# ingestion service arrives at M2 and the shared `artifacts` volume becomes
+# relevant at M5; both are stubbed out below so they slot in without a reshuffle.
+#
+#   postgres   PostgreSQL 19 with SQL/PGQ. The only stateful piece.
+#   migrate    one-shot: applies schema/migrations/ with goose, then exits.
+#   seed       one-shot: loads the demo corpus once the schema exists.
+#   mcp        long-running: serves the graph over GraphQL/MCP on HTTP.
+#
+# Run it from the repository root:
+#
+#   docker compose -f deploy/docker-compose.yml up -d --build
+#   docker compose -f deploy/docker-compose.yml down -v
+#
+# The build context is the repo root so `schema/` is reachable; every path below
+# is therefore written relative to the root, not to deploy/.
+name: codiq
+
+# One connection string, named once. `CODIQ_DATABASE_URL` is the name SPEC.md
+# §11.1 gives it and the name the M2 ingestion service will read; gopgql's own
+# binaries read `GOPGQL_DSN`, so the value is bound to both where it is used.
+x-codiq-database-url: &codiq-database-url postgres://codiq:codiq@postgres:5432/codiq?sslmode=disable
+
+# DBOS keeps its checkpoints in a *separate* database on the same instance
+# (§9, §10) so orchestration writes do not contend with the reduce phase's bulk
+# CopyFrom. deploy/initdb/01-dbos.sql creates it now so the database is there
+# when M3 needs it; nothing reads this URL until then.
+x-dbos-database-url: &dbos-database-url postgres://codiq:codiq@postgres:5432/codiq_dbos?sslmode=disable
+
+# Both gopgql services run the same image. See deploy/gopgql.Dockerfile for why
+# it is built from source and for the one-line swap back to the ghcr image.
+x-gopgql: &gopgql
+  build:
+    context: ..
+    dockerfile: deploy/gopgql.Dockerfile
+  # image: ghcr.io/gaarutyunov/gopgql:<pinned>   # <- swap: drop `build:`, add this
+  environment:
+    GOPGQL_DSN: *codiq-database-url
+
+services:
+  postgres:
+    # Pinned exactly, and to the same tag gopgql targets (§10, §11.1). SQL/PGQ
+    # is a PostgreSQL 19 feature; there is no fallback on 18.
+    image: postgres:19beta2
+    environment:
+      POSTGRES_USER: codiq
+      POSTGRES_PASSWORD: codiq
+      POSTGRES_DB: codiq
+    ports:
+      # Loopback only: an example database with example credentials has no
+      # business being reachable from the network.
+      - "127.0.0.1:5432:5432"
+    volumes:
+      # /var/lib/postgresql, NOT /var/lib/postgresql/data — SPEC.md §11.1's
+      # snippet has the pre-18 path, and the 18+ images refuse to start on it:
+      # they now keep data in a major-version-specific subdirectory so
+      # `pg_upgrade --link` does not cross a mount boundary
+      # (docker-library/postgres#1259). Mounting the parent is the documented
+      # configuration and the one that survives a major-version bump.
+      - pgdata:/var/lib/postgresql
+      # Runs once, on an empty data directory only.
+      - ./initdb:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U codiq -d codiq"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+  # The schema, applied from the migrations committed to the repo.
+  #
+  # No --sdl on purpose. With one, `gopgql migrate` regenerates the migration
+  # history from the SDL before applying it; without one it is a plain `goose up`
+  # over --dir. The migrations are a reviewed, committed artifact (§4.1 — they
+  # are generated, but generated *at authoring time*), so the container applies
+  # exactly what is in the tree and an SDL that has drifted from it fails a
+  # review rather than silently reshaping a database.
+  #
+  # Regenerate them with, from the repository root:
+  #   gopgql generate --sdl schema/codiq.graphql --dir schema/migrations --name <slug>
+  migrate:
+    <<: *gopgql
+    depends_on:
+      postgres:
+        condition: service_healthy
+    volumes:
+      - ../schema/migrations:/migrations:ro
+    command: ["gopgql", "migrate", "--dir", "/migrations"]
+
+  # Demo data (§14 M1: "over inserted test data"). M1 has no ingestion pipeline,
+  # so this is the only writer; it is the one service that goes away at M2.
+  #
+  # psql comes from the postgres image rather than from the gopgql image, so the
+  # client is the same version as the server and gopgql's image stays two static
+  # binaries with nothing else in it.
+  seed:
+    image: postgres:19beta2
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    environment:
+      CODIQ_DATABASE_URL: *codiq-database-url
+    volumes:
+      - ./seed:/seed:ro
+    # $$ escapes compose's own interpolation so the shell expands it.
+    command: ["sh", "-c", "psql \"$$CODIQ_DATABASE_URL\" -v ON_ERROR_STOP=1 -q -f /seed/seed.sql"]
+
+  # The read surface (§8): GraphQL compiled to SQL/PGQ, served over MCP. CodiQ
+  # builds no MCP layer of its own. The server never writes — its pool opens
+  # with default_transaction_read_only=on — so the ingestion path stays the only
+  # writer even when the same credentials are shared.
+  #
+  # It reads the SDL, not the database, to know what is queryable, so it needs
+  # the source of truth mounted.
+  mcp:
+    <<: *gopgql
+    depends_on:
+      seed:
+        condition: service_completed_successfully
+    environment:
+      GOPGQL_DSN: *codiq-database-url
+      GOPGQL_TRANSPORT: http
+      GOPGQL_ADDR: ":8080"
+    ports:
+      - "127.0.0.1:8080:8080"
+    volumes:
+      - ../schema/codiq.graphql:/schema/codiq.graphql:ro
+    command: ["gopgql-mcp", "--sdl", "/schema/codiq.graphql"]
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:8080/healthz >/dev/null || exit 1"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+
+  # --- Not yet ---------------------------------------------------------------
+  #
+  # M2 adds the ingestion service (§14 M2): a single program that parses files
+  # with gotreesitter and inserts into this schema. M3 gives it DBOS, which is
+  # where DBOS_DATABASE_URL starts being read. M5 adds the protobuf artifacts on
+  # a shared volume (§10) — the local stand-in for the ReadWriteMany PVC that
+  # replaces it under Kubernetes (§16).
+  #
+  # codiq:
+  #   build:
+  #     context: ..
+  #   depends_on:
+  #     migrate:
+  #       condition: service_completed_successfully
+  #   environment:
+  #     CODIQ_DATABASE_URL: *codiq-database-url
+  #     DBOS_DATABASE_URL: *dbos-database-url    # from M3
+  #     CODIQ_ARTIFACT_DIR: /artifacts           # from M5
+  #   volumes:
+  #     - artifacts:/artifacts                   # from M5
+
+volumes:
+  pgdata:
+  # artifacts:   # from M5

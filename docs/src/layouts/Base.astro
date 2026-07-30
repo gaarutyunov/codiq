@@ -1,0 +1,77 @@
+---
+// The ui-kit's theme, vendored under docs/vendor/ui-kit and bundled by Astro so
+// the page fetches no stylesheet and no font at runtime. The kit's *runtime*
+// entry cannot be imported here — frontmatter runs in Node during the build,
+// where customElements and HTMLElement do not exist — so it is registered from
+// the client <script> at the bottom of this file instead.
+import '../../vendor/ui-kit/src/tokens/tokens.css'
+import '../styles/site.css'
+import { url } from '../lib/url.js'
+
+const { title, description } = Astro.props
+const here = Astro.url.pathname
+
+// Marks the header link for the section being read. Every path here is a
+// section root, so a prefix test covers the pages nested under it.
+const current = (path) =>
+  (path === '/' ? here === url('/') : here.startsWith(url(path))) ? 'page' : undefined
+---
+
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <!-- Inline so the tab icon costs no request and no committed binary: three
+         nodes and two edges, in the kit's accent blue on its background black. -->
+    <link
+      rel="icon"
+      href={
+        'data:image/svg+xml,' +
+        encodeURIComponent(
+          '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32">' +
+            '<rect width="32" height="32" rx="7" fill="#000"/>' +
+            '<path d="M9 9 L23 16 L9 23" stroke="#54a2ff" stroke-width="2.5" fill="none" stroke-linecap="round" stroke-linejoin="round"/>' +
+            '<circle cx="9" cy="9" r="3" fill="#54a2ff"/>' +
+            '<circle cx="23" cy="16" r="3" fill="#54a2ff"/>' +
+            '<circle cx="9" cy="23" r="3" fill="#54a2ff"/>' +
+            '</svg>',
+        )
+      }
+    />
+    <title>{title}</title>
+    <meta name="description" content={description} />
+    <meta property="og:title" content={title} />
+    <meta property="og:description" content={description} />
+    <meta property="og:type" content="website" />
+  </head>
+  <body>
+    <ga-header brand="codiq" href={url('/')}>
+      <a href={url('/docs/')} aria-current={current('/docs/')}>Docs</a>
+      <a href={url('/demo/')} aria-current={current('/demo/')}>Demo</a>
+      <a href="https://github.com/gaarutyunov/codiq">GitHub</a>
+    </ga-header>
+
+    <div class="wrap">
+      <slot />
+
+      <footer class="site">
+        <p>
+          CodiQ turns source code into a queryable property graph in PostgreSQL and
+          serves it to agents over MCP. Reads are owned by
+          <a href="https://github.com/gaarutyunov/gopgql">gopgql</a>; the full
+          architecture is in
+          <a href="https://github.com/gaarutyunov/codiq/blob/main/SPEC.md">SPEC.md</a>.
+          Interface built with
+          <a href="https://github.com/gaarutyunov/ui-kit">gaarutyunov/ui-kit</a>.
+        </p>
+      </footer>
+    </div>
+
+    <!-- Registers every <ga-*> custom element. Astro bundles this into a
+         hashed module served from the site itself; the elements upgrade in
+         place, so the markup above is meaningful before it runs. -->
+    <script>
+      import '../../vendor/ui-kit/src/index.js'
+    </script>
+  </body>
+</html>

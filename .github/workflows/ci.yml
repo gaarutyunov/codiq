@@ -1,0 +1,108 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: build, vet & integration tests
+    runs-on: ubuntu-latest
+    # The suite builds gopgql from source in a container before it can run a
+    # single scenario (deploy/gopgql.Dockerfile), and the Docker layer cache is
+    # cold on a fresh runner. 25 minutes is the same ceiling gopgql's own suite
+    # runs under; the `go test` timeout below fails first and with a stack.
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          # go.mod is the single place the toolchain version is written.
+          go-version-file: go.mod
+          cache: true
+      - name: gofmt
+        run: |
+          unformatted="$(gofmt -l .)"
+          if [ -n "$unformatted" ]; then
+            echo "::error::gofmt would reformat:"; echo "$unformatted"; exit 1
+          fi
+      - name: go build
+        run: go build ./...
+      - name: go vet
+        run: go vet ./...
+      # The godog suite boots postgres:19beta2, builds and runs gopgql, applies
+      # schema/migrations/, seeds deploy/seed/seed.sql and drives MCP over HTTP —
+      # all through testcontainers-go, which needs the Docker daemon the runner
+      # already has (SPEC.md §13: no shims).
+      - name: integration tests (godog + testcontainers)
+        run: go test -v -timeout 20m ./test/...
+
+  lint:
+    name: golangci-lint
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: install golangci-lint
+        run: |
+          curl -sSfL https://raw.githubusercontent.com/golangci/golangci-lint/HEAD/install.sh \
+            | sh -s -- -b "$(go env GOPATH)/bin" v2.5.0
+      - name: run golangci-lint
+        run: golangci-lint run ./...
+
+  govulncheck:
+    name: govulncheck
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: install govulncheck
+        run: go install golang.org/x/vuln/cmd/govulncheck@latest
+      - name: run govulncheck
+        run: govulncheck ./...
+
+  schema:
+    name: migrations match the SDL
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      # schema/migrations/ is generated from schema/codiq.graphql at authoring
+      # time and committed (deploy/docker-compose.yml explains why the migrate
+      # service runs without --sdl). That only holds if an SDL edit that was not
+      # regenerated fails a check rather than a review: `gopgql generate` writes
+      # nothing when the two already agree, so a dirty tree is the drift.
+      #
+      # Pinned to the same commit deploy/gopgql.Dockerfile installs.
+      - name: install gopgql
+        run: go install github.com/gaarutyunov/gopgql/cmd/gopgql@85a2f68c18f1e0c987ff41c22818f132791674aa
+      - name: regenerate migrations from the SDL
+        run: gopgql generate --sdl schema/codiq.graphql --dir schema/migrations
+      - name: fail if the SDL and the migrations disagree
+        run: |
+          if [ -n "$(git status --porcelain schema/migrations)" ]; then
+            echo "::error::schema/migrations is stale; regenerate it from schema/codiq.graphql"
+            git status --porcelain schema/migrations
+            git diff -- schema/migrations
+            exit 1
+          fi
