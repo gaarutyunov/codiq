@@ -1,0 +1,295 @@
+---
+import Base from '../layouts/Base.astro'
+import Code from '../components/Code.astro'
+import { url } from '../lib/url.js'
+
+// Every response below was captured from a real `gopgql-mcp` process over the
+// MCP streamable-HTTP transport, against the corpus in deploy/seed/seed.sql —
+// see the provenance note rendered at the top of the page. Nothing here is
+// invented, and nothing here is live: the page is static, so what you are
+// reading is a recorded transcript, not a query being run now.
+const scenarios = [
+  {
+    id: 'calls',
+    label: 'Call graph',
+    hint: 'Two definitions are named `Put` — the interface method and the concrete one. Only the concrete one is called, and the caller is in a third file. Nothing in `store.go` recorded that `main.go` exists; the `calls` edge was derived by matching descriptors after both files were loaded.',
+    query: `{
+  occurrence(name: "Put", role: "definition") {
+    name
+    descriptor
+    definedIn { path }
+    calledBy { name definedIn { path } }
+  }
+}`,
+    result: `{
+  "occurrence": [
+    {
+      "calledBy": [],
+      "definedIn": [
+        { "path": "internal/graph/iface.go" }
+      ],
+      "descriptor": "scip-go gomod github.com/gaarutyunov/codiq v0.1.0 internal/graph/Storer#Put().",
+      "name": "Put"
+    },
+    {
+      "calledBy": [
+        {
+          "definedIn": [ { "path": "cmd/codiq/main.go" } ],
+          "name": "main"
+        }
+      ],
+      "definedIn": [
+        { "path": "internal/graph/store.go" }
+      ],
+      "descriptor": "scip-go gomod github.com/gaarutyunov/codiq v0.1.0 internal/graph/Store#Put().",
+      "name": "Put"
+    }
+  ]
+}`,
+  },
+  {
+    id: 'resolution',
+    label: 'Same-file vs cross-file',
+    hint: 'This is the whole architecture in one response. Both rows are a reference to the identifier `Store`, and they carry the same descriptor. The one at byte 222 is the receiver in `store.go`, whose definition is in the same CST — extraction resolved it, so it has a `references_local` edge. The one at byte 155 is `graph.Store{…}` in `main.go`; a file-local extractor could not resolve it, so it was written with the target descriptor unresolved and the link pass matched it afterwards into `resolves_to`. Same question, two edge kinds, decided by which file the definition happened to be in.',
+    query: `{
+  occurrence(name: "Store", role: "reference") {
+    name
+    rangeStart
+    resolvesTo      { descriptor definedIn { path } }
+    referencesLocal { descriptor definedIn { path } }
+  }
+}`,
+    result: `{
+  "occurrence": [
+    {
+      "name": "Store",
+      "rangeStart": 222,
+      "referencesLocal": [
+        {
+          "definedIn": [ { "path": "internal/graph/store.go" } ],
+          "descriptor": "scip-go gomod github.com/gaarutyunov/codiq v0.1.0 internal/graph/Store#"
+        }
+      ],
+      "resolvesTo": []
+    },
+    {
+      "name": "Store",
+      "rangeStart": 155,
+      "referencesLocal": [],
+      "resolvesTo": [
+        {
+          "definedIn": [ { "path": "internal/graph/store.go" } ],
+          "descriptor": "scip-go gomod github.com/gaarutyunov/codiq v0.1.0 internal/graph/Store#"
+        }
+      ]
+    }
+  ]
+}`,
+  },
+  {
+    id: 'implements',
+    label: 'Interfaces',
+    hint: 'The SCIP implementation relationship, across files. `Storer` is declared in `iface.go` and `Store` in `store.go`; neither file mentions the other by identity, and the edge is derived. Note `symbolKind` is neutral-core vocabulary — `interface` and `type` here, not Go‑specific node names.',
+    query: `{
+  occurrence(name: "Storer") {
+    name
+    symbolKind
+    implementedBy { name symbolKind definedIn { path } }
+  }
+}`,
+    result: `{
+  "occurrence": [
+    {
+      "implementedBy": [
+        {
+          "definedIn": [ { "path": "internal/graph/store.go" } ],
+          "name": "Store",
+          "symbolKind": "type"
+        }
+      ],
+      "name": "Storer",
+      "symbolKind": "interface"
+    }
+  ]
+}`,
+  },
+  {
+    id: 'imports',
+    label: 'Blast radius',
+    hint: 'One `import "internal/graph"` in the source becomes one edge per file of that package, because the model’s unit is the file, not the package. `pkgName` is the descriptor prefix the coordinate resolver supplied from go.mod — it is a property of the project, and no file could have produced it on its own.',
+    query: `{
+  file(path: "cmd/codiq/main.go") {
+    path
+    lang
+    pkgName
+    imports { path lang }
+  }
+}`,
+    result: `{
+  "file": [
+    {
+      "imports": [
+        { "lang": "go", "path": "internal/graph/iface.go" },
+        { "lang": "go", "path": "internal/graph/store.go" }
+      ],
+      "lang": "go",
+      "path": "cmd/codiq/main.go",
+      "pkgName": "github.com/gaarutyunov/codiq"
+    }
+  ]
+}`,
+  },
+  {
+    id: 'scope',
+    label: 'Lexical scope',
+    hint: 'The containment skeleton, asked from the scope side. A scope says where a name could resolve and never what it resolves to — so what comes back is byte ranges and the occurrences inside them, with no resolution implied. The second scope is `main()`: it defines `store` and then references `Store` and `Put`, both of which live in another file.',
+    query: `{
+  scope(kind: "function") {
+    kind
+    rangeStart
+    rangeEnd
+    occurrences { name role symbolKind }
+  }
+}`,
+    result: `{
+  "scope": [
+    {
+      "kind": "function",
+      "occurrences": [
+        { "name": "db", "role": "reference", "symbolKind": "field" }
+      ],
+      "rangeEnd": 415,
+      "rangeStart": 210
+    },
+    {
+      "kind": "function",
+      "occurrences": [
+        { "name": "store", "role": "definition", "symbolKind": "variable" },
+        { "name": "Store",  "role": "reference",  "symbolKind": "type" },
+        { "name": "Put",    "role": "reference",  "symbolKind": "method" }
+      ],
+      "rangeEnd": 305,
+      "rangeStart": 120
+    }
+  ]
+}`,
+  },
+]
+
+const tabs = JSON.stringify(
+  scenarios.map((s) => ({ id: s.id, label: s.label })),
+)
+---
+
+<Base
+  title="Demo — CodiQ"
+  description="Five recorded exchanges with the CodiQ MCP server, over the seeded three-file corpus."
+>
+  <h1>Demo</h1>
+  <p class="lede">
+    Five questions an agent would ask about a codebase, asked over MCP, answered
+    from the graph.
+  </p>
+
+  <ga-note tone="warning" title="Recorded, not live">
+    This page is static, so nothing on it executes. Every response below is a
+    <strong>verbatim transcript</strong> captured from a real
+    <code>gopgql-mcp</code> process — the stack in
+    <a href={url('/docs/run-locally/')}>run it locally</a>, brought up against
+    <code>deploy/seed/seed.sql</code> — not a hand-written illustration and not a
+    browser re-implementation. Bring the same stack up yourself and these queries
+    return these responses. Unlike
+    <a href="https://gaarutyunov.github.io/gopgql/">gopgql's playground</a>, which
+    compiles its own Go to WebAssembly and really does run in the page, CodiQ's
+    read path is a PostgreSQL 19 <code>GRAPH_TABLE</code> query — there is no
+    honest way to run it without the database, so the demo records the exchange
+    instead of faking it.
+  </ga-note>
+
+  <h2>The corpus</h2>
+  <p>
+    Three files of one Go package, hand-extracted the way the M2 extractor will
+    produce them, chosen so that every one of the five derived cross-file edge
+    kinds is actually present. A one-file corpus could not exercise any of them.
+  </p>
+  <Code
+    code={`cmd/codiq/main.go ──imports──▶ internal/graph/store.go ──implements──▶ internal/graph/iface.go
+
+  main()             ──calls──▶          Store.Put()      (cross-file, derived)
+  Store              ──implements──▶     Storer           (cross-file, derived)
+  store              ──type_defines──▶   Store            (cross-file, derived)
+  graph.Store (ref)  ──resolves_to──▶    Store (def)      (cross-file, derived)
+  s.db (ref)         ──references_local──▶ db (def)       (same file, extracted)`}
+  />
+
+  <h2>The exchanges</h2>
+  <ga-tabs tabs={tabs} active={scenarios[0].id}>
+    {
+      // The slot name has to reach ga-tabs as a real attribute. Written as
+      // `slot={s.id}` inside an expression the Astro compiler consumes it as its
+      // own slot directive and drops it; passed through a spread it survives.
+      scenarios.map((s) => (
+        <div {...{ slot: s.id }}>
+          <p class="muted" set:html={s.hint.replace(/`([^`]+)`/g, '<code>$1</code>')} />
+          <div class="exchange">
+            <div>
+              <Code label="Request — sent as the query tool's query argument" code={s.query} />
+            </div>
+            <div>
+              <Code label="Response — captured verbatim" code={s.result} />
+            </div>
+          </div>
+        </div>
+      ))
+    }
+  </ga-tabs>
+
+  <h2>Run them yourself</h2>
+  <p>
+    Bring the stack up, point an MCP client at
+    <code>http://127.0.0.1:8080/mcp</code>, and ask. The server exposes two tools:
+    <code>introspect</code>, which answers what is queryable without touching the
+    database, and <code>query</code>, which runs a GraphQL operation against it.
+  </p>
+  <Code
+    prompt="$"
+    code={`docker compose -f deploy/docker-compose.yml up -d --build`}
+  />
+  <div class="cta">
+    <ga-button href={url('/docs/run-locally/')} variant="primary">
+      Run it locally
+    </ga-button>
+    <ga-button href={url('/docs/mcp/')}>The MCP surface</ga-button>
+  </div>
+
+  <h2 id="provenance">Provenance</h2>
+  <ga-table columns='[{"label":"","width":"180px"},{"label":""}]'>
+    <div>
+      <span class="muted">Server</span>
+      <span><code>gopgql-mcp</code>, <code>serverInfo</code>
+        <code>{'{ "name": "gopgql", "version": "dev" }'}</code>, built from source
+        at the commit pinned in <code>deploy/gopgql.Dockerfile</code>.</span>
+    </div>
+    <div>
+      <span class="muted">Transport</span>
+      <span>MCP streamable HTTP, protocol version <code>2025-06-18</code>.</span>
+    </div>
+    <div>
+      <span class="muted">Database</span>
+      <span><code>postgres:19beta2</code>, migrated with the committed
+        <code>schema/migrations/</code>.</span>
+    </div>
+    <div>
+      <span class="muted">Data</span>
+      <span><code>deploy/seed/seed.sql</code>, unmodified.</span>
+    </div>
+    <div>
+      <span class="muted">Captured</span>
+      <span>2026-07-30, while authoring this page.</span>
+    </div>
+  </ga-table>
+  <p class="muted">
+    Responses are reproduced with their key ordering and values unchanged;
+    whitespace is reflowed so the JSON fits the column.
+  </p>
+</Base>

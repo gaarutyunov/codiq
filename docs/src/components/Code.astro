@@ -1,0 +1,10 @@
+---
+// ga-code renders its default slot inside a `white-space: pre` block, so the
+// text has to reach it without the surrounding template's indentation. Passing
+// the source as a prop and writing it with set:text does exactly that, and also
+// keeps `<`, `&` and friends out of the HTML parser's way.
+const { code, label, prompt } = Astro.props
+---
+
+{label && <span class="label">{label}</span>}
+<ga-code prompt={prompt} set:text={code.replace(/\n$/, '')} />

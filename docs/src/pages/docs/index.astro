@@ -1,0 +1,142 @@
+---
+import Doc from '../../layouts/Doc.astro'
+import Code from '../../components/Code.astro'
+import { url } from '../../lib/url.js'
+
+const milestones = [
+  ['M1', 'SDL + database + MCP', 'shipped', 'The core SDL, the schema gopgql generates from it, and the GraphQL/MCP surface — over hand-written seed data.'],
+  ['M2', 'Go extractor, monolithic loader', 'next', 'Goroutines parse Go files with gotreesitter and insert into the M1 schema; a full link rebuild materialises the cross-file edges.'],
+  ['M3', 'Wrap in DBOS', 'planned', 'The M2 loop becomes a durable workflow — same behaviour, crash-resumable. Adds the codiq_dbos database.'],
+  ['M4', 'Map-reduce + batching', 'planned', 'Per-file extract on a durable queue, one batched reduce per run. Poison files are skipped, not fatal.'],
+  ['M5', 'Protobuf artifacts + disk offload', 'planned', 'Extract writes a protobuf artifact to a shared volume and returns a key; reduce reads by key and deletes on success.'],
+  ['M6–M7', 'TypeScript · Python', 'planned', 'A language is one sub-package plus a query file plus a coordinate resolver. No core schema change.'],
+  ['M8', 'Incremental link', 'planned', 'Re-link only the affected neighbourhood; a scheduled full rebuild stays as the self-healing backstop.'],
+  ['M9+', 'Additional languages', 'planned', 'Rust, Java, C#, Ruby, PHP, C/C++, Kotlin, Swift — each an independent task, in any order.'],
+]
+
+const toneOf = { shipped: 'green', next: 'blue', planned: undefined }
+---
+
+<Doc
+  title="What M1 ships"
+  eyebrow="M1"
+  description="The data model and the MCP surface, over seeded data. There is no ingestion pipeline yet — and that is the point."
+>
+  <p>
+    M1's claim is that <strong>the data model is the product</strong>. It ships the
+    first CodiQ SDL — the language-neutral core of §4.4 — and lets gopgql do the
+    rest: generate the vertex and edge tables, create the
+    <code>CREATE PROPERTY GRAPH</code> view over them, and serve GraphQL/MCP.
+    Rows come from a committed seed file, because no extractor exists yet.
+    Anyone can insert rows directly; the value on offer is the vocabulary and the
+    read surface, not the ingestion.
+  </p>
+
+  <h2>What is in the repository</h2>
+
+  <ga-table
+    columns='[{"label":"Path","mono":true,"width":"38%"},{"label":"What it is"}]'
+  >
+    <div>
+      <code>schema/codiq.graphql</code>
+      <span>The single source of truth. Three vertex types and the edges between
+        them, annotated for gopgql.</span>
+    </div>
+    <div>
+      <code>schema/migrations/</code>
+      <span><code>0001_core_tables.sql</code> and <code>0002_core_graph.sql</code> —
+        generated from the SDL, committed and reviewed, applied with goose.</span>
+    </div>
+    <div>
+      <code>deploy/docker-compose.yml</code>
+      <span>Postgres 19, a one-shot migrate, a one-shot seed, and the long-running
+        MCP server.</span>
+    </div>
+    <div>
+      <code>deploy/seed/seed.sql</code>
+      <span>A hand-extracted three-file Go package, shaped the way the M2
+        extractor will produce it.</span>
+    </div>
+    <div>
+      <code>docs/</code>
+      <span>This site: landing, docs and the demo.</span>
+    </div>
+    <div>
+      <code>features/</code>, <code>test/integration/</code>
+      <span>A godog feature and an integration test that starts the real
+        containers and asserts a seeded descriptor comes back over MCP.</span>
+    </div>
+  </ga-table>
+
+  <ga-note tone="warning" title="gopgql is built from source, for now">
+    SPEC.md §11.1 says the compose pulls gopgql from ghcr. gopgql has not cut a
+    tagged release yet, so <code>deploy/gopgql.Dockerfile</code> builds both
+    binaries from a pinned commit instead — the escape hatch §14 M1 explicitly
+    allows. Swapping back is deleting that file and giving the two services an
+    <code>image:</code> line; nothing else in <code>deploy/</code> changes.
+  </ga-note>
+
+  <h2>The two migrations</h2>
+  <p>
+    gopgql emits the tables and the property graph as separate, consecutively
+    numbered migrations, so no single file mixes DDL with the graph definition.
+    That ordering matters later: editing the SDL produces a graph-down, tables,
+    graph-up sequence, and one <code>gopgql migrate</code> applies it in order.
+  </p>
+  <Code
+    label="Applied by the migrate service, from the committed migrations"
+    prompt="$"
+    code={`gopgql migrate --dir /migrations`}
+  />
+  <p class="muted">
+    Note the absence of <code>--sdl</code>. With it, gopgql regenerates the
+    migration history from the SDL before applying it. Without it, the container
+    applies exactly what is in the tree — so an SDL that has drifted from its
+    migrations fails a review rather than silently reshaping a database.
+    Regenerating is a deliberate, separate step:
+  </p>
+  <Code
+    prompt="$"
+    code={`gopgql generate --sdl schema/codiq.graphql --dir schema/migrations --name <slug>`}
+  />
+
+  <h2>What M1 does not ship</h2>
+  <p>
+    No extractor, no orchestration, no protobuf artifacts, no link pass. Every
+    cross-file edge in the seed is written out by hand, in the place where the
+    link pass will later compute it. That is deliberate: the derived edges are
+    part of the model, and M1 is a claim about the model.
+  </p>
+
+  <h2>The milestones</h2>
+  <p>
+    Every milestone is a working, integration-tested, deployed vertical slice —
+    never a shim. The product works from M1; later milestones optimise the
+    ingestion internals in place without regressing it.
+  </p>
+  <ga-table
+    columns='[{"label":"","width":"72px","mono":true},{"label":"Milestone"},{"label":"","width":"96px","align":"right"}]'
+  >
+    {
+      milestones.map(([id, name, status, blurb]) => (
+        <div>
+          <code>{id}</code>
+          <div>
+            <strong>{name}</strong>
+            <div class="muted">{blurb}</div>
+          </div>
+          <span>
+            <ga-badge size="sm" color={toneOf[status]}>
+              {status}
+            </ga-badge>
+          </span>
+        </div>
+      ))
+    }
+  </ga-table>
+
+  <p>
+    Next: <a href={url('/docs/model/')}>the core model</a> — the three vertex
+    tables and the two kinds of edge between them.
+  </p>
+</Doc>

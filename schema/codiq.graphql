@@ -1,0 +1,232 @@
+# CodiQ — the core navigation + structural skeleton (SPEC.md §4.4).
+#
+# This document is the single source of truth (SPEC.md §4.1). gopgql compiles it
+# to the vertex/edge tables, their indexes, the `CREATE PROPERTY GRAPH` view over
+# them, and the GraphQL/MCP surface an agent queries. Nothing under
+# `schema/migrations/` is written by hand; it is emitted from this file.
+#
+# Scope is deliberately narrow. M1 ships the neutral core vocabulary and only
+# that — no CFG/PDG, no language-specific facts. Those are additive overlay
+# modules (§4.2, §16) that reference this core by SCIP descriptor and never
+# reshape it.
+#
+#   File ──defines──▶ Occurrence ──references_local / resolves_to / calls
+#    │                     ▲             / implements / type_defines──▶ Occurrence
+#    │                     │
+#    │                Scope ──contains──▶ Scope | Occurrence
+#    └──imports──▶ File
+#
+# Two invariants run through everything below and are load-bearing for every
+# later milestone:
+#
+#   1. File-disjoint incrementality (§2.5). Every base row is owned by exactly
+#      one file and carries `file_id`, so the reduce phase's per-file
+#      delete-by-file + CopyFrom (§6) can rewrite one file's rows without
+#      reading another's. Nothing about one file's rows may depend on another's.
+#   2. Identity is a string (§4.3). A symbol is named by a SCIP-style descriptor
+#      — `scheme manager package version descriptor-path` — and cross-file
+#      resolution is a string match on it, not an opaque id lookup. The link
+#      pass's only "index" is the btree on `occurrence.descriptor` (§7).
+#
+# Mapping notes, because they are the places where §4.4 and gopgql's dialect do
+# not line up exactly:
+#
+#   * §4.4 names `file.file_id` as the file table's primary key. gopgql requires
+#     every vertex type to declare a surrogate `id: ID!`, which becomes
+#     `id uuid PRIMARY KEY DEFAULT gen_random_uuid()`, and every edge table
+#     references `<table>(id)`. So the file's key is `file.id`, and `file_id` is
+#     kept as the *owning-file* column on the rows that are not files —
+#     `occurrence.file_id`, `scope.file_id` — which is where §2.5 needs it.
+#   * gopgql edge tables carry exactly `(source_id, target_id)` and no other
+#     column, so an edge row cannot carry `file_id` of its own. Edge ownership is
+#     therefore derived from an endpoint rather than stored: an intra-file edge is
+#     owned by the file both endpoints share, and a cross-file edge is owned by
+#     its *referencing* file (§7 "Ownership & deletion"), i.e. by `source_id`'s
+#     `file_id`. Delete-by-file for edges is a join, not a column read. If that
+#     join ever shows up as the bottleneck, the fix is an edge-side `file_id`
+#     column, which gopgql cannot express today.
+#   * Physical table names are pinned with `@node(table:)` to the singular names
+#     §4.4 uses, rather than letting gopgql pluralise the label. gopgql derives
+#     the GraphQL query root field from the *table* name, so the roots read
+#     `{ file … }`, `{ occurrence … }`, `{ scope … }`.
+
+# A source file: the unit of extraction, of ownership, and of incrementality.
+#
+# The package coordinate columns are the descriptor *prefix* (§4.3): the batch's
+# per-ecosystem manifest resolver reads go.mod / package.json / … and maps each
+# file to its coordinate, so the extractor never needs project-wide knowledge.
+# `pkg_scheme` + `pkg_manager` + `pkg_name` + `pkg_version` + the stanza's
+# structural suffix is the full descriptor.
+type File @node(label: "file", table: "file") {
+  id: ID!
+
+  # Repo-relative path. Indexed rather than UNIQUE on purpose: uniqueness of a
+  # path is a property of a *corpus*, and the corpus boundary is not modelled in
+  # M1. Promote to `@key(fields: ["path"])` once one exists — that also makes a
+  # file selectable by path in a MATCH.
+  path: String! @index(name: "file_path_idx", using: "btree")
+
+  # Extractor language tag ("go", "typescript", …). Chooses the stanza set.
+  lang: String! @index(name: "file_lang_idx", using: "btree")
+
+  # Descriptor prefix (§4.3), e.g. `scip-go` `gomod` `github.com/foo/bar` `v1`.
+  pkgScheme: String! @column(name: "pkg_scheme")
+  pkgManager: String! @column(name: "pkg_manager")
+  pkgName: String! @column(name: "pkg_name")
+  pkgVersion: String! @column(name: "pkg_version")
+
+  # Extracted, intra-file: this file declares these definitions (§4.4).
+  defines: [Occurrence!]! @relationship(type: "defines", direction: OUT)
+
+  # Derived, cross-file: import edges materialised by the link pass (§7), keyed
+  # by module/file descriptor. Not extracted — an import target lives in another
+  # file, and a file-local extractor may not look at it.
+  imports: [File!]! @relationship(type: "imports", direction: OUT)
+  importedBy: [File!]!
+    @relationship(type: "imports", direction: IN)
+    @hasInverse(field: "imports")
+}
+
+# A SCIP-style occurrence: one place in one file where a symbol is defined or
+# used. Definitions and references are the *same* row shape distinguished by
+# `role`, which is what lets the link pass be a single self-join on `descriptor`
+# rather than two tables and two join paths.
+type Occurrence @node(label: "occurrence", table: "occurrence") {
+  id: ID!
+
+  # Owning file (§2.5). Indexed because delete-by-file is the hot write path in
+  # every reduce (§6), not because reads need it.
+  fileId: ID!
+    @column(name: "file_id")
+    @index(name: "occurrence_file_id_idx", using: "btree")
+
+  # The full SCIP-style descriptor (§4.3), e.g.
+  #   `scip-go gomod github.com/foo/bar v1 pkg/Type#method().`
+  #
+  # This is THE join key of the whole system: the link pass (§7) matches
+  # `reference.descriptor == definition.descriptor` and the "symbol index" is
+  # exactly this btree — there is no separate structure. A reference whose
+  # target is in another file carries the target's descriptor unresolved until
+  # the link pass runs, so this column is meaningful on both roles.
+  descriptor: String!
+    @index(name: "occurrence_descriptor_idx", using: "btree")
+
+  # `definition` | `reference`. Constrained in the database rather than in the
+  # loader: the loader is generated and the schema is the source of truth, so a
+  # bad role should be PostgreSQL's error at COPY time, not a Go assertion.
+  role: String! @check(expr: "role IN ('definition', 'reference')")
+
+  # Neutral-core kind — `function`, `method`, `type`, `variable`, `package`, …
+  # Normalised *to* the core by each language's stanzas (§4.2); language-specific
+  # kinds belong in an overlay, not here.
+  symbolKind: String! @column(name: "symbol_kind")
+
+  # The identifier as it appears in the source. Redundant with the descriptor's
+  # tail, and kept anyway: it is what an agent reads, and recomputing it means
+  # parsing the descriptor grammar on every read.
+  name: String! @index(name: "occurrence_name_idx", using: "btree")
+
+  # Byte offsets into the file, half-open [start, end).
+  rangeStart: Int! @column(name: "range_start")
+  rangeEnd: Int! @column(name: "range_end")
+
+  # Innermost enclosing lexical scope, denormalised alongside the `contains`
+  # edge (§4.4 lists both). The column answers "which scope is this in?" without
+  # a graph traversal — the question the loader asks while it is still writing
+  # rows and the property graph is not involved. Nullable: a file-top-level
+  # occurrence has no enclosing scope.
+  scopeId: ID @column(name: "scope_id")
+
+  # --- Extracted, intra-file (§4.4 base edge tables) -------------------------
+
+  # `file → occurrence(definition)`; the inverse of File.defines.
+  definedIn: [File!]!
+    @relationship(type: "defines", direction: IN)
+    @hasInverse(field: "defines")
+
+  # `scope → occurrence`; the inverse of Scope.occurrences.
+  scope: [Scope!]!
+    @relationship(type: "contains", table: "contains_occurrence", direction: IN)
+    @hasInverse(field: "occurrences")
+
+  # `occurrence(reference) → occurrence(definition)`, same file, resolved at
+  # extraction time because the target definition is in the same CST (§4.3).
+  referencesLocal: [Occurrence!]!
+    @relationship(type: "references_local", direction: OUT)
+  referencedLocallyBy: [Occurrence!]!
+    @relationship(type: "references_local", direction: IN)
+    @hasInverse(field: "referencesLocal")
+
+  # --- Derived, cross-file (§4.4 derived edge tables, materialised by §7) ----
+  #
+  # None of these are extracted. Each is written by the link pass from base
+  # facts joined on `descriptor`, owned by the referencing file, and deleted and
+  # recomputed when that file changes. Materialising them is what makes
+  # cross-file navigation a read rather than a query-time resolution (§8).
+
+  # Cross-file use, matched by descriptor.
+  resolvesTo: [Occurrence!]! @relationship(type: "resolves_to", direction: OUT)
+  resolvedFrom: [Occurrence!]!
+    @relationship(type: "resolves_to", direction: IN)
+    @hasInverse(field: "resolvesTo")
+
+  # Structural call graph. Approximate by construction — it is derived from
+  # syntax plus descriptor matching, with no type resolution — and refined later
+  # by a precise-call overlay (§4.2), never by reshaping this edge.
+  calls: [Occurrence!]! @relationship(type: "calls", direction: OUT)
+  calledBy: [Occurrence!]!
+    @relationship(type: "calls", direction: IN)
+    @hasInverse(field: "calls")
+
+  # SCIP implementation relationship.
+  implements: [Occurrence!]! @relationship(type: "implements", direction: OUT)
+  implementedBy: [Occurrence!]!
+    @relationship(type: "implements", direction: IN)
+    @hasInverse(field: "implements")
+
+  # SCIP type-definition relationship: this occurrence's *type* is defined
+  # there. Source is any occurrence, not only a definition (§4.4).
+  typeDefines: [Occurrence!]! @relationship(type: "type_defines", direction: OUT)
+  typeDefinedBy: [Occurrence!]!
+    @relationship(type: "type_defines", direction: IN)
+    @hasInverse(field: "typeDefines")
+}
+
+# A lexical scope: the containment skeleton a file's occurrences hang off.
+# Purely structural — a scope says where a name *could* resolve, never what it
+# resolves to.
+type Scope @node(label: "scope", table: "scope") {
+  id: ID!
+
+  fileId: ID!
+    @column(name: "file_id")
+    @index(name: "scope_file_id_idx", using: "btree")
+
+  # `file`, `package`, `function`, `block`, `class`, … — neutral core, same rule
+  # as Occurrence.symbolKind.
+  kind: String!
+
+  rangeStart: Int! @column(name: "range_start")
+  rangeEnd: Int! @column(name: "range_end")
+
+  # Enclosing scope, denormalised alongside the `contains` edge for the same
+  # reason `Occurrence.scopeId` is. Null for a file's root scope.
+  parentScopeId: ID @column(name: "parent_scope_id")
+
+  # --- Extracted, intra-file -------------------------------------------------
+  #
+  # §4.4 gives `contains` one table with two possible endpoint types
+  # (`scope → scope | occurrence`). A gopgql edge table has one source table and
+  # one destination table, so this is split into two physical tables that share
+  # the single label `contains`: a MATCH on the label spans both, which is the
+  # §4.4 semantics, while each table keeps a real foreign key to its own target.
+
+  childScopes: [Scope!]!
+    @relationship(type: "contains", table: "contains_scope", direction: OUT)
+  parentScope: [Scope!]!
+    @relationship(type: "contains", table: "contains_scope", direction: IN)
+    @hasInverse(field: "childScopes")
+
+  occurrences: [Occurrence!]!
+    @relationship(type: "contains", table: "contains_occurrence", direction: OUT)
+}

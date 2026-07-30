@@ -1,0 +1,19 @@
+# Docs site (SPEC.md §11.2 — Astro + ui-kit). All three are generated —
+# .astro is Astro's type cache — and the site is published from the workflow,
+# never from a committed build. docs/package-lock.json IS committed, so a clean
+# checkout builds with `npm ci` in docs/.
+docs/node_modules/
+docs/dist/
+docs/.astro/
+
+# Go build output. `cmd/codiq` arrives at M2 and `go build` drops the binary in
+# the package directory by default; the coverage and profile files are what the
+# test flags leave behind.
+/codiq
+/cmd/codiq/codiq
+*.test
+coverage.out
+*.prof
+
+# Editor / OS noise.
+.DS_Store

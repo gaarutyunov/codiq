@@ -1,0 +1,57 @@
+---
+// Every docs page: the shared sidebar built from lib/nav.js, plus a prev/next
+// pair derived from the same ordering so the set reads front to back.
+import Base from './Base.astro'
+import { docsNav } from '../lib/nav.js'
+import { url } from '../lib/url.js'
+
+const { title, description, eyebrow } = Astro.props
+const here = Astro.url.pathname
+
+const index = docsNav.findIndex((item) => url(item.href) === here)
+const prev = index > 0 ? docsNav[index - 1] : null
+const next = index >= 0 && index < docsNav.length - 1 ? docsNav[index + 1] : null
+---
+
+<Base title={`${title} — CodiQ`} description={description}>
+  <div class="docs">
+    <nav class="sidebar" aria-label="Documentation">
+      <span class="eyebrow">Documentation</span>
+      {
+        docsNav.map((item) => (
+          <a
+            href={url(item.href)}
+            aria-current={url(item.href) === here ? 'page' : undefined}
+          >
+            {item.title}
+          </a>
+        ))
+      }
+    </nav>
+
+    <article class="article">
+      {eyebrow && <ga-badge color="blue" size="sm">{eyebrow}</ga-badge>}
+      <h1>{title}</h1>
+      <p class="lede">{description}</p>
+
+      <slot />
+
+      {
+        (prev || next) && (
+          <div class="next">
+            {prev && (
+              <ga-button href={url(prev.href)} variant="ghost">
+                ← {prev.title}
+              </ga-button>
+            )}
+            {next && (
+              <ga-button href={url(next.href)} variant="secondary">
+                {next.title} →
+              </ga-button>
+            )}
+          </div>
+        )
+      }
+    </article>
+  </div>
+</Base>
