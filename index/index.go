@@ -61,12 +61,17 @@ type DB interface {
 	Begin(ctx context.Context) (pgx.Tx, error)
 }
 
-// Skip is one file the run did not load: the extractor could not parse it, so
-// store wrote nothing and whatever it had loaded before is still in place.
+// Skip is one file the run did not load, so store wrote nothing for it and
+// whatever it had loaded before is still in place.
 type Skip struct {
 	// Path is repo-relative, as it would appear in the `file` table.
 	Path string
-	// Err is the parse failure, wrapping store.ErrParseFailed.
+	// Err is why the file was skipped. It wraps store.ErrParseFailed when the
+	// extractor could not parse the file; from M4 a file whose map task failed
+	// outright — an unreadable file, most commonly — is skipped too, and carries
+	// that failure instead (SPEC.md §9: the batch proceeds over the successful
+	// subset). errors.Is is how to tell the two apart, before or after a
+	// checkpoint (dbos.go's Skip.MarshalJSON).
 	Err error
 }
 
@@ -80,14 +85,17 @@ type Result struct {
 	Files int
 	// Loaded is how many of those files were written to the database.
 	Loaded int
-	// Skipped lists the unparseable files, sorted by path. Loaded + len(Skipped)
-	// == Files on a successful run.
+	// Skipped lists the files that were not loaded, sorted by path. Loaded +
+	// len(Skipped) == Files on a successful run.
 	Skipped []Skip
-	// Retries is how many per-file loads were retried after a transient
-	// serialization failure. Nonzero is normal on a re-index and not an error;
-	// growing with the size of the tree is worth looking at.
+	// Retries is how many loads were retried after a transient serialization
+	// failure — per file for Run, per batch for the DBOS workflow, which is one
+	// transaction over the whole batch (reduce.go). Nonzero is normal on a
+	// re-index and not an error; growing with the size of the tree is worth
+	// looking at.
 	Retries int
-	// Concurrency is the worker limit the run used.
+	// Concurrency is the worker limit the run used: the errgroup's for Run, the
+	// "extract" queue's per-executor limit for the DBOS workflow.
 	Concurrency int
 }
 
@@ -240,8 +248,23 @@ const maxLoadAttempts = 5
 // short staggered backoff is what stops the two from colliding again, since the
 // victim is chosen at random rather than by age.
 func (l loader) loadWithRetry(ctx context.Context, db DB, ff facts.FileFacts) (int, error) {
+	return withRetry(ctx, func() error { return l.load(ctx, db, ff) })
+}
+
+// withRetry runs op, retrying a transient serialization failure with a short
+// staggered backoff, and reports how many retries it took.
+//
+// The backoff is staggered rather than fixed because PostgreSQL picks its
+// deadlock victim at random rather than by age, so two transactions that
+// retried in lockstep would collide again. The attempt cap turns a pathological
+// case into an error rather than a hang.
+//
+// The whole unit passed in is what gets re-run, which is why this is a
+// parameter and not a loop around l.load: at M2 the unit is one file's
+// transaction, at M4 it is the batch's (reduce.go).
+func withRetry(ctx context.Context, op func() error) (int, error) {
 	for attempt := 1; ; attempt++ {
-		err := l.load(ctx, db, ff)
+		err := op()
 		if err == nil || attempt == maxLoadAttempts || !serializationFailure(err) {
 			return attempt - 1, err
 		}
@@ -287,9 +310,14 @@ func (l loader) extract(root, path string, c coord.Coord) (facts.FileFacts, erro
 	}
 	src, err := os.ReadFile(path)
 	if err != nil {
-		// Not a parse failure and not a skip: the extractor never saw the bytes,
-		// so nothing is known about the file either way, and silently indexing a
-		// partial repository is worse than failing the run.
+		// Not a parse failure: the extractor never saw the bytes, so nothing is
+		// known about the file either way and there are no facts to report. What
+		// happens next is the caller's, and the two callers answer differently
+		// on purpose. Run is M2's monolithic loader and has no way to report a
+		// partial repository other than by failing, so it fails. The M4 workflow
+		// does have one — this is a map task's failure, the batch proceeds over
+		// the successful subset and the file is flagged (SPEC.md §5, §9) — so it
+		// skips. That difference is the milestone, not an inconsistency.
 		return facts.FileFacts{}, fmt.Errorf("index: %w", err)
 	}
 	ff := parser.Parse(path, src, c)

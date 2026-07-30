@@ -636,30 +636,40 @@ func (st *m3State) checkpointsSurvived(ctx context.Context) error {
 }
 
 // oneCheckpointPerFile is the same claim from the other side: the finished
-// ledger holds one step per file and no more, so no file was started twice.
+// ledger holds one enqueue and one await per file and no more, so no file was
+// started twice.
 //
-// It is also where the shape of a run is pinned — resolve, walk, one load per
-// file, link — which is the sequence index.WorkflowVersion names and the thing
-// a replay is replaying.
+// It is also where the shape of a run is pinned, and M4 changed that shape.
+// M3's parent ran resolve, walk, one `load:<rel>` step per file, link. M4's
+// parent runs resolve, walk, then per file one `codiq.ExtractFile` child
+// workflow enqueued on the "extract" queue and one `DBOS.getResult` awaiting
+// it, and finally a single reduce. There is no `link` step at all any more: the
+// link pass moved inside the reduce, into the same transaction as the batch
+// store (index/reduce.go). The per-file `extract:` checkpoints are in the
+// children rather than here, which is what loadCheckpoints counts.
+//
+// That sequence is what index.WorkflowVersion names — `codiq-index-2` — and
+// the thing a replay is replaying, so it is asserted step by step rather than
+// only counted.
 func (st *m3State) oneCheckpointPerFile(ctx context.Context, files int) error {
 	ledger, err := ledgerOf(ctx, st.runID)
 	if err != nil {
 		return err
 	}
 	names := map[string]int{}
-	loads := 0
 	for _, c := range ledger {
 		names[c.Name]++
-		if strings.HasPrefix(c.Name, "load:") {
-			loads++
-		}
 	}
+	m3Logf("the finished parent ledger holds %v", names)
 	return check(func(t assert.TestingT) {
-		assert.Equal(t, files, loads, "load steps checkpointed")
-		assert.Len(t, names, files+3, "distinct steps: one per file, plus resolve, walk and link")
+		assert.Equal(t, files, names[index.ExtractWorkflowName], "map tasks enqueued")
+		assert.Equal(t, files, names["DBOS.getResult"], "map tasks awaited")
 		assert.Equal(t, 1, names["resolve"], "resolve steps")
 		assert.Equal(t, 1, names["walk"], "walk steps")
-		assert.Equal(t, 1, names["link"], "link steps")
+		assert.Equal(t, 1, names["reduce"], "reduce steps")
+		assert.Zero(t, names["link"], "link steps: the link pass is inside the reduce since M4")
+		assert.Len(t, names, 5, "distinct steps: resolve, walk, enqueue, await, reduce")
+		assert.Len(t, ledger, 2*files+3, "checkpoints in the parent ledger")
 	})
 }
 
@@ -831,7 +841,14 @@ func (st *m3State) waitForCheckpoints(ctx context.Context, files int) error {
 
 // --- the checkpoint database -----------------------------------------------
 
-// loadCheckpoints counts the file loads durably recorded for runs of one module.
+// loadCheckpoints counts the per-file work durably recorded for runs of one
+// module.
+//
+// The step is named `extract:` rather than `load:` since M4: the per-file task
+// extracts and no longer loads, since loading moved into the batch reduce
+// (index/dbos.go, index/reduce.go). It also lives in the file's own child
+// workflow rather than in the parent, and the prefix match still finds it
+// because DBOS names a child `<parent id>-<step id>`.
 func loadCheckpoints(ctx context.Context, idPrefix string) (int, error) {
 	ready, err := dbosMigrated(ctx)
 	if err != nil || !ready {
@@ -840,8 +857,8 @@ func loadCheckpoints(ctx context.Context, idPrefix string) (int, error) {
 	var n int
 	if err := dbosPool.QueryRow(ctx, `
 		SELECT count(*) FROM dbos.operation_outputs
-		WHERE workflow_uuid LIKE $1 AND function_name LIKE 'load:%'`, idPrefix).Scan(&n); err != nil {
-		return 0, fmt.Errorf("count load checkpoints: %w", err)
+		WHERE workflow_uuid LIKE $1 AND function_name LIKE 'extract:%'`, idPrefix).Scan(&n); err != nil {
+		return 0, fmt.Errorf("count extract checkpoints: %w", err)
 	}
 	return n, nil
 }
@@ -851,10 +868,20 @@ func loadCheckpoints(ctx context.Context, idPrefix string) (int, error) {
 // Listed by ID prefix, which index.RunIDPrefix documents at length: a workflow's
 // recorded input comes back as raw encoded JSON under the default serializer,
 // so matching on it silently matches nothing.
+//
+// The prefix alone is not the whole filter since M4, and this is the one place
+// that matters. DBOS names a child workflow `<parent id>-<step id>`, so every
+// one of the run's per-file extract tasks shares the run's prefix — an
+// intentional property (index.RunIDPrefix) that makes "the run and everything
+// it enqueued" one LIKE, and that would make "how many runs of this module are
+// there?" answer 154 for a 152-file corpus. A *run* is a workflow recorded
+// under index.WorkflowName; the map tasks are recorded under
+// index.ExtractWorkflowName, and it is the name that tells them apart.
 func (st *m3State) workflowIDs(ctx context.Context) ([]string, error) {
 	rows, err := dbosPool.Query(ctx, `
 		SELECT workflow_uuid FROM dbos.workflow_status
-		WHERE workflow_uuid LIKE $1 ORDER BY created_at`, index.RunIDPrefix(st.repo)+"%")
+		WHERE workflow_uuid LIKE $1 AND name = $2 ORDER BY created_at`,
+		index.RunIDPrefix(st.repo)+"%", index.WorkflowName)
 	if err != nil {
 		return nil, fmt.Errorf("list workflows: %w", err)
 	}
