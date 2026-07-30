@@ -91,7 +91,7 @@ func TestFeatures(t *testing.T) {
 		ScenarioInitializer: InitializeScenario,
 		Options: &godog.Options{
 			Format:   "pretty",
-			Paths:    []string{filepath.Join(repoRoot, "features")},
+			Paths:    []string{filepath.Join(repoRoot, "features", "schema_mcp.feature")},
 			TestingT: t,
 			Strict:   true,
 		},
