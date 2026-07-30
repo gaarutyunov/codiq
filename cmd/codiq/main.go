@@ -90,7 +90,7 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) error {
 	fs.SetOutput(stderr)
 	dsn := fs.String("dsn", "", "PostgreSQL connection string (default $"+dsnEnv+")")
 	dbosDSN := fs.String("dbos-dsn", "", "DBOS checkpoint connection string (default $"+dbosDSNEnv+")")
-	verbose := fs.Bool("v", false, "print the parse error behind every skipped file")
+	verbose := fs.Bool("v", false, "print the reason behind every skipped file")
 	fs.Usage = func() {
 		_, _ = fmt.Fprintf(stderr, "usage: codiq [flags] [repo]\n\n"+
 			"Index a repository into the CodiQ graph. repo defaults to the working\n"+
@@ -144,9 +144,11 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) error {
 		return err
 	}
 	// Registration and launch are separate for one reason: Launch recovers this
-	// executor's unfinished workflows, so everything they need has to already be
-	// registered when it runs.
-	index.Register(dctx, pool)
+	// executor's unfinished workflows and starts the "extract" queue's workers,
+	// so everything they need has to already be registered when it runs.
+	if err := index.Register(dctx, pool); err != nil {
+		return err
+	}
 	if err := dbos.Launch(dctx); err != nil {
 		return fmt.Errorf("dbos: launch: %w", err)
 	}
@@ -226,7 +228,10 @@ func durable(ctx context.Context, dsn string, stderr io.Writer) (dbos.DBOSContex
 //     checkpoints; only the way it is reached differs.
 func start(dctx dbos.DBOSContext, target string) (dbos.WorkflowHandle[index.Result], bool, error) {
 	// Listed on the workflow ID rather than the recorded input; index.RunIDPrefix
-	// documents why that distinction is load-bearing. The oldest match wins,
+	// documents why that distinction is load-bearing. The name filter is just as
+	// load-bearing: the per-file map tasks are child workflows whose IDs DBOS
+	// derives as <parentID>-<stepID>, so they share the run's ID prefix, and
+	// without it the match found here is a map task, not the run. The oldest match wins,
 	// which is what the default ordering gives: if more than one run was left
 	// unfinished, the one that has been waiting longest is the one to finish, and
 	// the next invocation picks up the next.
@@ -241,6 +246,7 @@ func start(dctx dbos.DBOSContext, target string) (dbos.WorkflowHandle[index.Resu
 		}},
 	} {
 		found, err := dbos.ListWorkflows(dctx,
+			dbos.WithName(index.WorkflowName),
 			dbos.WithWorkflowIDPrefix(index.RunIDPrefix(target)),
 			dbos.WithStatus([]dbos.WorkflowStatusType{c.status}),
 		)
@@ -325,7 +331,8 @@ func open(ctx context.Context, dsn string) (*pgxpool.Pool, error) {
 // The skipped files are always listed, never only counted: a file silently
 // missing from the graph looks exactly like a file with nothing in it, and the
 // whole reason a poison file does not fail the run (SPEC.md §5) is that it is
-// visible instead. -v adds the parse error behind each one.
+// visible instead. -v adds the reason behind each one, which from M4 is either
+// a parse error or the failure of the file's map task (index.Skip).
 func report(w io.Writer, repo string, res index.Result, elapsed time.Duration, verbose bool) {
 	_, _ = fmt.Fprintf(w, "codiq: %s\n", repo)
 	_, _ = fmt.Fprintf(w, "  coordinate  %s\n", res.Coord.Prefix())
@@ -335,13 +342,13 @@ func report(w io.Writer, repo string, res index.Result, elapsed time.Duration, v
 	if res.Retries > 0 {
 		// Not a warning: two files that reference each other contend on the
 		// cross-file edges they share, and one of them backs off and wins.
-		_, _ = fmt.Fprintf(w, "  retried     %d file loads after a serialization failure\n", res.Retries)
+		_, _ = fmt.Fprintf(w, "  retried     %d loads after a serialization failure\n", res.Retries)
 	}
 
 	if len(res.Skipped) == 0 {
 		return
 	}
-	_, _ = fmt.Fprintf(w, "  skipped     %d unparseable (previous facts left in place)\n", len(res.Skipped))
+	_, _ = fmt.Fprintf(w, "  skipped     %d not indexed (previous facts left in place)\n", len(res.Skipped))
 	for _, s := range res.Skipped {
 		if verbose {
 			_, _ = fmt.Fprintf(w, "                %s: %v\n", s.Path, s.Err)
@@ -350,6 +357,6 @@ func report(w io.Writer, repo string, res index.Result, elapsed time.Duration, v
 		_, _ = fmt.Fprintf(w, "                %s\n", s.Path)
 	}
 	if !verbose {
-		_, _ = fmt.Fprintf(w, "              re-run with -v for the parse errors\n")
+		_, _ = fmt.Fprintf(w, "              re-run with -v for the reasons\n")
 	}
 }
