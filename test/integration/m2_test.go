@@ -259,7 +259,15 @@ func (st *m2State) moduleIndexed(ctx context.Context) error {
 	if st.repo == "" {
 		return errors.New("no module; the Given step did not run")
 	}
-	cmd := exec.CommandContext(ctx, codiqBin, "-dsn", connString, "-v", st.repo)
+	// -dbos-dsn as well as -dsn since M3: the binary is a DBOS workflow now and
+	// refuses to run without a checkpoint database. The database itself is
+	// already there — deploy/initdb/01-dbos.sql creates it and startStack mounts
+	// that script — so this is the flag and nothing else (m3_test.go).
+	dbosDSN, err := dbosConnString(connString)
+	if err != nil {
+		return err
+	}
+	cmd := exec.CommandContext(ctx, codiqBin, "-dsn", connString, "-dbos-dsn", dbosDSN, "-v", st.repo)
 	out, err := cmd.CombinedOutput()
 	st.report = string(out)
 	if err != nil {

@@ -28,8 +28,8 @@ x-codiq-database-url: &codiq-database-url postgres://codiq:codiq@postgres:5432/c
 
 # DBOS keeps its checkpoints in a *separate* database on the same instance
 # (§9, §10) so orchestration writes do not contend with the reduce phase's bulk
-# CopyFrom. deploy/initdb/01-dbos.sql creates it now so the database is there
-# when M3 needs it; nothing reads this URL until then.
+# CopyFrom. deploy/initdb/01-dbos.sql creates it; the `codiq` service reads this
+# URL from M3 onwards, and nothing else ever opens that database.
 x-dbos-database-url: &dbos-database-url postgres://codiq:codiq@postgres:5432/codiq_dbos?sslmode=disable
 
 # Both gopgql services run the same image. See deploy/gopgql.Dockerfile for why
@@ -114,15 +114,21 @@ services:
     # $$ escapes compose's own interpolation so the shell expands it.
     command: ["sh", "-c", "psql \"$$CODIQ_DATABASE_URL\" -v ON_ERROR_STOP=1 -q -f /seed/seed.sql"]
 
-  # Ingestion (§14 M2): the monolithic loader. It walks a repository, parses each
-  # supported file with gotreesitter on a pool of goroutines, replaces that
-  # file's rows, and rebuilds the cross-file edges once at the end.
+  # Ingestion (§14 M2, M3): the loader, as a DBOS workflow. It walks a
+  # repository, parses each supported file with gotreesitter, replaces that
+  # file's rows, and rebuilds the cross-file edges once at the end — with every
+  # stage checkpointed into `codiq_dbos`.
   #
   # One-shot, like `seed`, and for a stronger reason than symmetry: replacing a
   # file's rows is idempotent and the link rebuild is a pure function of the base
   # facts, so indexing is a thing you *finish*, not a thing you leave running.
-  # Re-run it after a change with `docker compose run --rm codiq`; a watch loop
-  # is M3's, once DBOS makes a run crash-resumable.
+  # Re-run it after a change with `docker compose run --rm codiq`.
+  #
+  # Since M3 a run that dies is finished rather than redone: the next `run --rm
+  # codiq` over the same path attaches to the interrupted workflow and continues
+  # from its last checkpoint. That is what DBOS_DATABASE_URL below buys, and it
+  # is why the container has no restart policy to add — restarting it *is* the
+  # recovery path.
   #
   # The corpus is §14 M2's own acceptance fixture: the two-file module where
   # `main` calls a `Greeter` defined in the other file. So `up` yields the
@@ -158,6 +164,9 @@ services:
         condition: service_completed_successfully
     environment:
       CODIQ_DATABASE_URL: *codiq-database-url
+      # The graph pool and the checkpoint pool are two databases on purpose (§9
+      # "Isolation"); the binary refuses to start without both.
+      DBOS_DATABASE_URL: *dbos-database-url
     volumes:
       - ../extract/golang/testdata/greeter:/repo:ro
     command: ["codiq", "/repo"]
@@ -191,15 +200,12 @@ services:
 
   # --- Not yet ---------------------------------------------------------------
   #
-  # M3 wraps the `codiq` loop in a DBOS workflow, which is where
-  # DBOS_DATABASE_URL starts being read. M5 adds the protobuf artifacts on a
-  # shared volume (§10) — the local stand-in for the ReadWriteMany PVC that
-  # replaces it under Kubernetes (§16). Both are additions to the `codiq`
-  # service above, not new services:
+  # M5 adds the protobuf artifacts on a shared volume (§10) — the local stand-in
+  # for the ReadWriteMany PVC that replaces it under Kubernetes (§16). An
+  # addition to the `codiq` service above, not a new service:
   #
   # codiq:
   #   environment:
-  #     DBOS_DATABASE_URL: *dbos-database-url    # from M3
   #     CODIQ_ARTIFACT_DIR: /artifacts           # from M5
   #   volumes:
   #     - artifacts:/artifacts                   # from M5
