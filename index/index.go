@@ -2,11 +2,11 @@
 // in the core tables (SPEC.md §14 M2).
 //
 // The whole pipeline is four steps, in order: resolve the repository's package
-// coordinate once (coord), walk the tree for files a parser is registered for
-// (extract), parse and load each of those files independently (extract +
-// store), then materialize the cross-file edges once at the end (link). Nothing
-// here derives anything itself — it is wiring, and every rule it enforces
-// belongs to one of those four packages.
+// coordinates once, one per ecosystem (coord), walk the tree for files a parser
+// is registered for (extract), parse and load each of those files independently
+// (extract + store), then materialize the cross-file edges once at the end
+// (link). Nothing here derives anything itself — it is wiring, and every rule it
+// enforces belongs to one of those four packages.
 //
 // Two properties of the design are worth stating because the rest of the
 // package is shaped by them:
@@ -78,8 +78,17 @@ type Skip struct {
 // Result is what a run did. It is returned even when the run fails, so a caller
 // can report the files that were already loaded.
 type Result struct {
-	// Coord is the package coordinate resolved for the repository.
+	// Coord is the repository's primary package coordinate: the one a report
+	// names when it has room for exactly one (coord.Set.Primary). A repository
+	// with a single ecosystem — a Go module, an npm package — has precisely the
+	// coordinate this field has always held; a repository with two has one of
+	// the two, and Coords is where the rest of it is.
 	Coord coord.Coord
+	// Coords is every coordinate the repository resolved, keyed by the file
+	// extensions each ecosystem owns. It, and not Coord, is what decided the
+	// descriptors in the graph: a coordinate is a property of (repository,
+	// ecosystem), so each file was stamped with its own language's.
+	Coords coord.Set
 	// Files is how many files the walk selected — those with a registered
 	// parser, after the ignore rules.
 	Files int
@@ -158,10 +167,13 @@ func (l loader) run(ctx context.Context, db DB, repo string) (Result, error) {
 		return Result{}, fmt.Errorf("index: %s: %w", repo, err)
 	}
 
-	// Once per repository, not once per file: the coordinate comes from a
-	// manifest outside the file being parsed, which is exactly why it is not the
-	// extractor's to resolve (SPEC.md §4.3).
-	c, err := coord.Resolve(root)
+	// Once per repository and once per ecosystem, never once per file: a
+	// coordinate comes from a manifest outside the file being parsed, which is
+	// exactly why it is not the extractor's to resolve (SPEC.md §4.3) — but it
+	// is a property of (repository, ecosystem), so a repository holding a go.mod
+	// beside a package.json resolves two and every file is stamped with its own
+	// language's (coord.Set).
+	coords, err := coord.Resolve(root)
 	if err != nil {
 		return Result{}, fmt.Errorf("index: %w", err)
 	}
@@ -171,7 +183,7 @@ func (l loader) run(ctx context.Context, db DB, repo string) (Result, error) {
 		return Result{}, fmt.Errorf("index: walk %s: %w", repo, err)
 	}
 
-	res := Result{Coord: c, Files: len(paths), Concurrency: l.limit}
+	res := Result{Coord: coords.Primary, Coords: coords, Files: len(paths), Concurrency: l.limit}
 
 	// WithContext so the first real failure cancels the workers still running
 	// instead of letting them finish writing into a load that is already lost.
@@ -181,7 +193,7 @@ func (l loader) run(ctx context.Context, db DB, repo string) (Result, error) {
 	var mu sync.Mutex // guards res.Loaded and res.Skipped
 	for _, path := range paths {
 		g.Go(func() error {
-			ff, err := l.extract(root, path, c)
+			ff, err := l.extract(root, path, coords.For(path))
 			if err != nil {
 				return err
 			}

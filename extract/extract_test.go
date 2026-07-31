@@ -10,6 +10,7 @@ import (
 	"github.com/gaarutyunov/codiq/coord"
 	"github.com/gaarutyunov/codiq/extract"
 	"github.com/gaarutyunov/codiq/extract/golang"
+	"github.com/gaarutyunov/codiq/extract/ts"
 )
 
 func TestParserFor(t *testing.T) {
@@ -20,6 +21,8 @@ func TestParserFor(t *testing.T) {
 	}{
 		{name: "a Go file", path: filepath.FromSlash("/repo/main.go"), want: true},
 		{name: "a Go file in a subdirectory", path: filepath.FromSlash("/repo/pkg/a/b.go"), want: true},
+		{name: "a TypeScript file", path: filepath.FromSlash("/repo/src/main.ts"), want: true},
+		{name: "a TSX file, which needs its own grammar", path: filepath.FromSlash("/repo/src/app.tsx"), want: false},
 		{name: "no extension", path: filepath.FromSlash("/repo/Makefile"), want: false},
 		{name: "an unregistered extension", path: filepath.FromSlash("/repo/main.rs"), want: false},
 		{name: "the extension is case sensitive", path: filepath.FromSlash("/repo/main.GO"), want: false},
@@ -40,7 +43,7 @@ func TestParserFor(t *testing.T) {
 }
 
 func TestExtensions(t *testing.T) {
-	assert.Equal(t, []string{golang.Ext}, extract.Extensions())
+	assert.Equal(t, []string{golang.Ext, ts.Ext}, extract.Extensions())
 }
 
 // TestRegisteredParserParses is the end-to-end check on the registry: the entry
@@ -72,5 +75,14 @@ func TestRegisteredParserParses(t *testing.T) {
 // coord and never extract, so there is no cycle to break.
 func TestGolangParserSatisfiesParserStructurally(t *testing.T) {
 	var p extract.Parser = golang.New()
+	assert.NotNil(t, p)
+}
+
+// TestTSParserSatisfiesParserStructurally is the same constraint for the second
+// language, and it is the one that turns SPEC 12's claim into something
+// checked rather than asserted: two independent sub-packages now satisfy Parser
+// without either importing extract.
+func TestTSParserSatisfiesParserStructurally(t *testing.T) {
+	var p extract.Parser = ts.New()
 	assert.NotNil(t, p)
 }

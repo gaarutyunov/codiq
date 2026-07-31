@@ -5,12 +5,23 @@
 // descriptor suffix from the CST alone, because that is all a file-local
 // extractor may know. The package coordinate is project-wide knowledge — it
 // comes from a manifest (go.mod, package.json, pyproject.toml) that lives
-// outside the file being parsed — so it is resolved once per repo by the batch
-// and handed to every parser. Keeping it here is what lets the extractor stay
-// file-local (SPEC.md §2.2, §2.5).
+// outside the file being parsed — so it is resolved by the batch and handed to
+// every parser. Keeping it here is what lets the extractor stay file-local
+// (SPEC.md §2.2, §2.5).
 //
-// One resolver per ecosystem; go.mod is the only one M2 ships (gomod.go).
-// M6/M7 add npm.go and pyproject.go beside it and register them here.
+// A coordinate is a property of *(repository, ecosystem)* and not of a
+// repository. A repository holding a go.mod beside a package.json has two of
+// them, and a file belongs to the one its own language declares. Resolving a
+// single coordinate per repository stamps every TypeScript file with the Go
+// module's scheme, manager, name and version — which makes a TypeScript class
+// and a Go type in a same-named directory render the byte-identical descriptor,
+// and the link pass (§7) joins on the descriptor and nothing else, so it
+// materializes a cross-language edge that does not exist. Resolve therefore
+// returns a Set: one coordinate per ecosystem, keyed by the file extensions
+// that ecosystem owns.
+//
+// One Ecosystem per language; go.mod was the only one M2 shipped (gomod.go).
+// M6 adds npm.go beside it and M7 pyproject.go, each registering itself here.
 package coord
 
 import (
@@ -118,48 +129,194 @@ func Foreign(scheme, manager, name string) Coord {
 // declares.
 type Resolver func(dir string) (Coord, error)
 
-// resolvers maps a manifest filename to the resolver that reads it. Registered
-// from each ecosystem's file (gomod.go now; npm.go, pyproject.go at M6/M7).
-var resolvers = map[string]Resolver{}
+// Ecosystem is one language ecosystem's coordinate source: the manifest that
+// declares a package, the SCIP scheme/manager pair its symbols carry, and the
+// file extensions whose files belong to it.
+//
+// Exts is what makes the arity right. A registry keyed by manifest alone can
+// answer "which manifests exist" but not "which of them owns this file", and
+// the second question is the one a mixed repository asks — so a caller with
+// only the first has no choice but to pick one coordinate for the whole tree,
+// which is the defect described in this package's doc comment.
+type Ecosystem struct {
+	// Manifest is the filename From reads, e.g. "go.mod".
+	Manifest string
+	// Scheme and Manager are the SCIP pair every symbol of this ecosystem
+	// carries, e.g. "scip-go" and "gomod".
+	//
+	// They are stated here as well as produced by From because they are what an
+	// ecosystem with *no* manifest is stamped with: a .ts file in a repository
+	// that has a go.mod and no package.json still needs a coordinate, and the
+	// one thing it must not be given is another language's (unknown).
+	Scheme, Manager string
+	// Exts are the file extensions this ecosystem owns, leading dot included.
+	Exts []string
+	// From reads Manifest in a directory and returns the coordinate it declares.
+	From Resolver
+}
 
-// Register registers a resolver under the manifest filename it reads.
-// It panics on a duplicate registration, which can only be a build defect.
-func Register(manifest string, r Resolver) {
-	if _, dup := resolvers[manifest]; dup {
-		panic(fmt.Sprintf("coord: resolver already registered for %q", manifest))
+// unknown is this ecosystem's coordinate in a repository that declares no
+// manifest for it: the right scheme and manager, no name and no version, and
+// the directory the repository's other manifests were read from, so that
+// namespaces still separate one directory from another.
+//
+// Deliberately not the zero Coord. A zero coordinate renders `. . . .` and
+// carries no Root, so Namespace returns "" for every file and two same-named
+// symbols in different directories would render the same descriptor — the same
+// false match Set exists to prevent, reintroduced one level down.
+func (e Ecosystem) unknown(root string) Coord {
+	return Coord{Scheme: e.Scheme, Manager: e.Manager, Name: Unknown, Version: Unknown, Root: root}
+}
+
+// ecosystems maps a manifest filename to the ecosystem that reads it; owner
+// maps a file extension to that ecosystem's manifest. Registered from each
+// ecosystem's file (gomod.go, npm.go; pyproject.go at M7).
+var (
+	ecosystems = map[string]Ecosystem{}
+	owner      = map[string]string{}
+)
+
+// Register registers an ecosystem under the manifest filename it reads. It
+// panics on a duplicate manifest or a duplicate extension, either of which can
+// only be a build defect — and a doubly-owned extension is the one that would
+// silently hand a file to whichever ecosystem registered last.
+func Register(e Ecosystem) {
+	if _, dup := ecosystems[e.Manifest]; dup {
+		panic(fmt.Sprintf("coord: resolver already registered for %q", e.Manifest))
 	}
-	resolvers[manifest] = r
+	for _, ext := range e.Exts {
+		if prev, dup := owner[ext]; dup {
+			panic(fmt.Sprintf("coord: %q is already owned by %q", ext, prev))
+		}
+		owner[ext] = e.Manifest
+	}
+	ecosystems[e.Manifest] = e
 }
 
 // Manifests returns the registered manifest filenames, sorted.
 func Manifests() []string {
-	out := make([]string, 0, len(resolvers))
-	for m := range resolvers {
+	out := make([]string, 0, len(ecosystems))
+	for m := range ecosystems {
 		out = append(out, m)
 	}
 	sort.Strings(out)
 	return out
 }
 
-// Resolve finds the nearest registered manifest at or above dir and returns the
-// coordinate it declares. It is the entry point the batch calls once per repo.
-func Resolve(dir string) (Coord, error) {
+// Extensions returns the registered file extensions, sorted, each with its
+// leading dot.
+//
+// It is the set of files that can be given a coordinate at all, and extract's
+// own registry has to list exactly the same set: a file a parser accepts but no
+// ecosystem owns has no scheme to be stamped with, and one an ecosystem owns
+// but no parser reads is a registration nothing consults. coord cannot check
+// that itself — extract imports coord, not the other way round — so the check
+// lives in this package's tests.
+func Extensions() []string {
+	out := make([]string, 0, len(owner))
+	for ext := range owner {
+		out = append(out, ext)
+	}
+	sort.Strings(out)
+	return out
+}
+
+// Set is a repository's package coordinates: one per registered ecosystem,
+// keyed by the file extensions that ecosystem owns.
+//
+// Every registered extension has an entry, resolved or not, which is what lets
+// the set alone decide every file's coordinate. That is more than tidiness:
+// index checkpoints this value and a recovering process reads it back rather
+// than resolving again (index/dbos.go's site), so a set that needed the
+// registry to be interpreted would be a checkpoint that means one thing in the
+// build that wrote it and another in the build that replays it.
+type Set struct {
+	// ByExt maps a file extension, leading dot included, to the coordinate of
+	// the ecosystem that owns files with that extension.
+	ByExt map[string]Coord `json:"by_ext"`
+	// Primary is the repository's headline coordinate: the one a report names
+	// when it has room for exactly one. It is the first in manifest-name order
+	// among the ecosystems that actually resolved, so a repository with a single
+	// ecosystem — a Go module, an npm package — has precisely the coordinate it
+	// has always had. A repository with two has one of the two, and ByExt is
+	// where the rest of the truth is.
+	Primary Coord `json:"primary"`
+}
+
+// For returns the coordinate of the ecosystem that owns path, which is decided
+// by path's extension and by nothing else about it.
+func (s Set) For(path string) Coord { return s.ByExt[filepath.Ext(path)] }
+
+// Resolve finds the nearest directory at or above dir that holds any registered
+// manifest and returns one coordinate per ecosystem. It is the entry point the
+// batch calls once per repository.
+//
+// Every manifest is read from that one directory rather than each being
+// searched for on its own. Searching per ecosystem would let a package.json
+// three levels above a Go module become that module's TypeScript coordinate,
+// and would let a malformed manifest outside the repository fail a run that has
+// no file of that language at all — so the rule is the one a repository root
+// already implies, and it is exactly the rule a single-ecosystem repository has
+// always had.
+//
+// An ecosystem with no manifest in that directory is not an error: it gets
+// Ecosystem.unknown, so its files are stamped with their own scheme and manager
+// and can never collide with another language's. No manifest at all is
+// ErrNoManifest, as it always was.
+func Resolve(dir string) (Set, error) {
 	abs, err := filepath.Abs(dir)
 	if err != nil {
-		return Coord{}, err
+		return Set{}, err
 	}
 	for cur := abs; ; {
+		found := map[string]Coord{}
 		for _, manifest := range Manifests() {
-			if _, err := os.Stat(filepath.Join(cur, manifest)); err == nil {
-				return resolvers[manifest](cur)
+			if _, err := os.Stat(filepath.Join(cur, manifest)); err != nil {
+				continue
 			}
+			c, err := ecosystems[manifest].From(cur)
+			if err != nil {
+				return Set{}, err
+			}
+			found[manifest] = c
+		}
+		if len(found) > 0 {
+			// cur and not abs: the manifests' own directory is the repository
+			// root, so both kinds of entry resolve namespaces against the same
+			// base and an unknown ecosystem's files are namespaced exactly as a
+			// resolved one's would have been.
+			return newSet(cur, found), nil
 		}
 		parent := filepath.Dir(cur)
 		if parent == cur {
-			return Coord{}, fmt.Errorf("%w at or above %s", ErrNoManifest, dir)
+			return Set{}, fmt.Errorf("%w at or above %s", ErrNoManifest, dir)
 		}
 		cur = parent
 	}
+}
+
+// newSet spreads the coordinates read from one directory over the extensions
+// their ecosystems own, filling in the ecosystems that had no manifest there.
+//
+// Manifest-name order is what makes Primary deterministic, and the iteration is
+// over the registry rather than over found so that the two kinds of entry are
+// produced by one loop and neither can be forgotten.
+func newSet(root string, found map[string]Coord) Set {
+	s := Set{ByExt: make(map[string]Coord, len(owner))}
+	for _, manifest := range Manifests() {
+		e := ecosystems[manifest]
+		c, ok := found[manifest]
+		switch {
+		case !ok:
+			c = e.unknown(root)
+		case s.Primary.IsZero():
+			s.Primary = c
+		}
+		for _, ext := range e.Exts {
+			s.ByExt[ext] = c
+		}
+	}
+	return s
 }
 
 func or(s, fallback string) string {

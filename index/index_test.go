@@ -49,9 +49,10 @@ func tree(t *testing.T, files map[string]string) string {
 
 func TestWalkSelectsOnlySupportedFiles(t *testing.T) {
 	// Guards the assumption every case below rests on: the walk filters on
-	// extract's registry, so a case listing a ".ts" file as unsupported is only
-	// meaningful while ".ts" really is.
-	require.Equal(t, []string{".go"}, extract.Extensions(),
+	// extract's registry, so a case listing a ".rs" file as unsupported is only
+	// meaningful while ".rs" really is. ".ts" was that file until M6 registered
+	// the TypeScript stanza, which is the tripwire working as intended.
+	require.Equal(t, []string{".go", ".ts"}, extract.Extensions(),
 		"the registry grew a language; revisit the unsupported files in these cases")
 
 	tests := []struct {
@@ -67,11 +68,12 @@ func TestWalkSelectsOnlySupportedFiles(t *testing.T) {
 				"README.md":  "# nope\n",
 				"query.scm":  "(nope)\n",
 				"app.ts":     "export {}\n",
+				"app.rs":     "fn main() {}\n",
 				"Makefile":   "all:\n",
 				"noext":      "\n",
 				"go.mod.bak": goMod,
 			},
-			want: []string{"main.go"},
+			want: []string{"app.ts", "main.go"},
 		},
 		{
 			name: "nested packages are walked",
@@ -100,6 +102,7 @@ func TestWalkSelectsOnlySupportedFiles(t *testing.T) {
 				"vendor/example.com/dep/d.go": "package dep\n",
 				"extract/testdata/fixture.go": "package fixture\n",
 				"node_modules/pkg/index.go":   "package pkg\n",
+				"node_modules/pkg/index.ts":   "export {}\n",
 				"_ignored/x.go":               "package ignored\n",
 				"docs/keep.go":                "package docs\n",
 			},
@@ -507,6 +510,96 @@ func TestRunNormalizesPathsAndKeepsNamespaces(t *testing.T) {
 	nested, ok := occurrence(loaded["internal/store/store.go"], facts.RoleDefinition, "Store")
 	require.True(t, ok)
 	assert.Equal(t, "scip-go gomod github.com/foo/bar . internal/store/Store#", nested.Descriptor.String())
+}
+
+// mixed is SPEC.md §14 M6's own corpus — a mixed-language repository — shaped
+// so that the two languages collide if they can: one go.mod, one package.json,
+// a Go package in greeter/ and a greeter.ts beside it, each declaring a Greeter.
+// A TypeScript module's namespace is its path with the extension removed, so
+// greeter.ts and the Go package greeter/ derive the same namespace, and the same
+// type name in it renders the same descriptor suffix. The coordinate prefix is
+// then the only thing left to tell them apart.
+var mixed = map[string]string{
+	"go.mod":       goMod,
+	"package.json": `{"name": "@codiq/mixed", "version": "2.0.0"}`,
+	"greeter/greeter.go": `package greeter
+
+type Greeter struct {
+	Name string
+}
+
+func (g *Greeter) Greet() string { return "hello, " + g.Name }
+`,
+	"main.go": `package main
+
+import (
+	"fmt"
+
+	"github.com/foo/bar/greeter"
+)
+
+func main() {
+	g := &greeter.Greeter{Name: "world"}
+	fmt.Println(g.Greet())
+}
+`,
+	"greeter.ts": `export class Greeter {
+  constructor(private readonly name: string) {}
+
+  greet(): string {
+    return "hello, " + this.name;
+  }
+}
+`,
+}
+
+// TestRunStampsEachFileWithItsOwnEcosystemsCoordinate is the regression test for
+// the defect M6 shipped with: index resolved one coordinate per *repository* and
+// handed it to every parser, so every TypeScript file in a mixed tree was
+// stamped `scip-go gomod …` and greeter.ts's class rendered the byte-identical
+// descriptor to greeter/greeter.go's type. main.go's reference to the Go type
+// then matched both, and link.RebuildResolvesTo — which joins on the descriptor
+// and nothing else — materialized a cross-language `resolves_to` edge that does
+// not exist.
+//
+// It is asserted before the database because that is where the defect is: by the
+// time the link pass runs, the two descriptors are already equal and no query
+// can tell the edge apart from a real one.
+func TestRunStampsEachFileWithItsOwnEcosystemsCoordinate(t *testing.T) {
+	root := tree(t, mixed)
+	rec := &recorder{}
+
+	res, err := newLoader(rec, 2).run(t.Context(), nil, root)
+	require.NoError(t, err)
+	require.Equal(t, []string{"greeter.ts", "greeter/greeter.go", "main.go"}, rec.paths())
+
+	loaded := rec.facts()
+	assert.Equal(t, "scip-go gomod github.com/foo/bar .", loaded["greeter/greeter.go"].File.Coord.Prefix())
+	assert.Equal(t, "scip-typescript npm @codiq/mixed 2.0.0", loaded["greeter.ts"].File.Coord.Prefix())
+
+	goType, ok := occurrence(loaded["greeter/greeter.go"], facts.RoleDefinition, "Greeter")
+	require.True(t, ok)
+	tsClass, ok := occurrence(loaded["greeter.ts"], facts.RoleDefinition, "Greeter")
+	require.True(t, ok)
+	ref, ok := occurrence(loaded["main.go"], facts.RoleReference, "Greeter")
+	require.True(t, ok)
+
+	assert.Equal(t, "scip-go gomod github.com/foo/bar . greeter/Greeter#", goType.Descriptor.String())
+	assert.Equal(t, "scip-typescript npm @codiq/mixed 2.0.0 greeter/Greeter#", tsClass.Descriptor.String())
+	assert.NotEqual(t, goType.Descriptor.String(), tsClass.Descriptor.String(),
+		"two definitions in two languages must not render the same descriptor")
+
+	// The other half of the same claim, from the side that does the damage: the
+	// reference the link pass joins on names the Go definition and only it.
+	assert.Equal(t, goType.Descriptor.String(), ref.Descriptor.String())
+	assert.NotEqual(t, tsClass.Descriptor.String(), ref.Descriptor.String(),
+		"a Go reference must not match a TypeScript definition")
+
+	// Result.Coord narrows to one coordinate for the report line; Coords is
+	// where the whole answer is, and it is what decided the descriptors above.
+	assert.Equal(t, res.Coords.Primary, res.Coord)
+	assert.Equal(t, loaded["greeter/greeter.go"].File.Coord, res.Coords.For("x.go"))
+	assert.Equal(t, loaded["greeter.ts"].File.Coord, res.Coords.For("x.ts"))
 }
 
 func TestRunRequiresAManifest(t *testing.T) {

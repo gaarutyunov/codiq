@@ -105,13 +105,13 @@ func TestExtractedCarriesNoFacts(t *testing.T) {
 // regression to blob-passing would otherwise be invisible.
 func TestFactsAreNotWhatCrossesTheCheckpoint(t *testing.T) {
 	root := tree(t, repo)
-	c, err := coord.Resolve(root)
+	coords, err := coord.Resolve(root)
 	require.NoError(t, err)
 	l := defaultLoader()
 
 	for _, rel := range []string{"main.go", "greeter.go", "internal/store/store.go"} {
 		t.Run(rel, func(t *testing.T) {
-			ff, err := l.extract(root, filepath.Join(root, filepath.FromSlash(rel)), c)
+			ff, err := l.extract(root, filepath.Join(root, filepath.FromSlash(rel)), coords.For(rel))
 			require.NoError(t, err)
 			require.NotEmpty(t, ff.Occurrences, "the fixture has to exercise the shapes")
 
@@ -200,9 +200,27 @@ func TestFileRefSurvivesACheckpoint(t *testing.T) {
 
 // TestSiteSurvivesACheckpoint covers the resolve step's output, which every map
 // task is handed a copy of.
+//
+// A two-ecosystem set and not a single coordinate, because that is what the step
+// records from M6 (coord.Set) and because the map inside it is the one part of
+// the shape a JSON round trip could plausibly lose — which would hand every file
+// the zero Coord and index a whole repository under `. . . .`.
 func TestSiteSurvivesACheckpoint(t *testing.T) {
-	in := site{Root: "/repo", Coord: coord.Coord{Scheme: "scip-go", Manager: "gomod", Name: "github.com/foo/bar", Version: "v0.1.0", Root: "/repo"}}
-	assert.Equal(t, in, checkpoint(t, in))
+	gomod := coord.Coord{Scheme: coord.GoScheme, Manager: coord.GoManager, Name: "github.com/foo/bar", Version: "v0.1.0", Root: "/repo"}
+	npm := coord.Coord{Scheme: coord.TSScheme, Manager: coord.NPMManager, Name: "@codiq/mixed", Version: "2.0.0", Root: "/repo"}
+	in := site{
+		Root: "/repo",
+		Coords: coord.Set{
+			ByExt:   map[string]coord.Coord{coord.GoExt: gomod, coord.TSExt: npm},
+			Primary: gomod,
+		},
+	}
+
+	out := checkpoint(t, in)
+
+	assert.Equal(t, in, out)
+	assert.Equal(t, gomod, out.Coords.For("pkg/a.go"), "a Go file still finds the go.mod coordinate")
+	assert.Equal(t, npm, out.Coords.For("src/a.ts"), "a TypeScript file still finds the package.json one")
 }
 
 // wrapped is an error that wraps a sentinel while keeping an arbitrary message,
