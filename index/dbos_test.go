@@ -5,13 +5,15 @@ import (
 	"encoding/json"
 	"errors"
 	"path/filepath"
+	"reflect"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/gaarutyunov/codiq/artifact"
 	"github.com/gaarutyunov/codiq/coord"
-	"github.com/gaarutyunov/codiq/facts"
 	"github.com/gaarutyunov/codiq/store"
 )
 
@@ -47,84 +49,82 @@ func checkpoint[T any](t *testing.T, in T) T {
 	return out
 }
 
-// TestFileFactsSurvivesACheckpoint is M4's load-bearing serialization claim.
+// TestExtractedSurvivesACheckpoint is M5's load-bearing serialization claim, and
+// it replaced M4's.
 //
-// At M3 the per-file step returned an error and nothing else, so facts never
-// crossed a checkpoint. At M4 they are the map phase's whole output: the reduce
-// loads what the extract tasks recorded, and if any of it decodes differently
-// than it was encoded then a resumed run writes a different graph than an
-// uninterrupted one — silently, since every field below is a plain value that
-// would come back as its zero rather than as an error.
+// At M4 the map task's output *was* the facts, so the claim was that a whole
+// facts.FileFacts round-trips through encoding/json. At M5 the facts do not
+// cross at all (SPEC.md §5: "the map task checkpoints the artifact key, never
+// the blob") — what crosses is this, and the equivalent claim about the facts
+// is now a claim about the artifact, asserted in artifact/codec_test.go against
+// the file the reduce actually reads.
 //
-// The facts are the real extractor's over real Go source, not a literal, so the
-// claim covers whatever shapes the mapper actually emits — nested Descriptors
-// with their coord.Coord prefix, both roles, all three edge kinds, LocalIDs
-// including NoID.
-func TestFileFactsSurvivesACheckpoint(t *testing.T) {
+// Both fields matter and they fail differently. A lost Key is a file the reduce
+// never loads; a lost ParseError is a poison file promoted to a good one, which
+// mapFiles would then let into the batch to delete its own graph.
+func TestExtractedSurvivesACheckpoint(t *testing.T) {
+	for _, in := range []extracted{
+		{Key: "ab/" + strings.Repeat("ab", 32) + ".pb"},
+		{ParseError: "syntax error at 12:4"},
+		{},
+	} {
+		assert.Equal(t, in, checkpoint(t, in))
+	}
+}
+
+// TestExtractedCarriesNoFacts is the milestone itself, stated as a test.
+//
+// M5 exists so that the map phase's output is bounded and small rather than one
+// serialized parse tree per file. A field added to `extracted` that carried
+// facts — the occurrences "just for the reduce", the source "just for
+// debugging" — would undo it silently, since everything would still work and
+// only `codiq_dbos` would grow. So the wire form is pinned: exactly two string
+// fields, and a payload the size of a key.
+func TestExtractedCarriesNoFacts(t *testing.T) {
+	typ := reflect.TypeOf(extracted{})
+	require.Equal(t, 2, typ.NumField(), "extracted is a key and a reason; nothing else may cross")
+	for i := range typ.NumField() {
+		assert.Equal(t, reflect.String, typ.Field(i).Type.Kind(),
+			"%s must stay a scalar", typ.Field(i).Name)
+	}
+
+	encoded, err := json.Marshal(any(extracted{Key: artifact.Key("/some/repo/root", "internal/pkg/file.go")}))
+	require.NoError(t, err)
+	assert.Less(t, len(encoded), 128,
+		"a checkpointed map-task output is a key, not a blob: %s", encoded)
+}
+
+// TestFactsAreNotWhatCrossesTheCheckpoint measures the substitution M5 made,
+// over the real extractor rather than over a literal.
+//
+// The number is the point. What used to be recorded twice per file — once as the
+// extract step's output and once as the map task's — is the JSON on the left;
+// what is recorded twice per file now is the JSON on the right. The assertion is
+// deliberately loose (an order of magnitude) because the ratio depends on the
+// file, and deliberately present because "smaller" is the whole milestone and a
+// regression to blob-passing would otherwise be invisible.
+func TestFactsAreNotWhatCrossesTheCheckpoint(t *testing.T) {
 	root := tree(t, repo)
 	c, err := coord.Resolve(root)
 	require.NoError(t, err)
-
 	l := defaultLoader()
+
 	for _, rel := range []string{"main.go", "greeter.go", "internal/store/store.go"} {
 		t.Run(rel, func(t *testing.T) {
 			ff, err := l.extract(root, filepath.Join(root, filepath.FromSlash(rel)), c)
 			require.NoError(t, err)
 			require.NotEmpty(t, ff.Occurrences, "the fixture has to exercise the shapes")
-			require.NotEmpty(t, ff.Edges)
 
-			assert.Equal(t, ff, checkpoint(t, ff),
-				"facts.FileFacts must decode exactly as it was encoded")
+			m4, err := json.Marshal(any(ff))
+			require.NoError(t, err)
+			m5, err := json.Marshal(any(extracted{Key: artifact.Key(root, rel)}))
+			require.NoError(t, err)
+
+			t.Logf("checkpoint payload: M4 %d bytes of facts, M5 %d bytes of key", len(m4), len(m5))
+			assert.Less(t, len(m5)*10, len(m4),
+				"the key has to be an order of magnitude smaller than the facts it replaced")
 		})
 	}
-}
-
-// TestFileFactsCheckpointsEveryFieldItHas guards the claim above against the
-// fixture rather than against the type: a field the Go mapper never populates
-// would round-trip vacuously.
-//
-// So this one hand-builds a FileFacts with every field set to something that is
-// not its zero value — including the ones the round trip could plausibly lose:
-// a Descriptor, whose Prefix is a struct rather than a string; a Role and an
-// EdgeKind, which are defined types over string; LocalIDs, which are int32; and
-// ParseError, which is how a poison file reports itself.
-func TestFileFactsCheckpointsEveryFieldItHas(t *testing.T) {
-	c := coord.Coord{
-		Scheme:  "scip-go",
-		Manager: "gomod",
-		Name:    "github.com/foo/bar",
-		Version: "v1.2.3",
-		Root:    "/repo",
-	}
-	ff := facts.FileFacts{
-		File:   facts.File{Path: "pkg/a.go", Lang: "go", Coord: c},
-		Scopes: []facts.Scope{{ID: 1, Kind: facts.ScopeFile, RangeStart: 0, RangeEnd: 42, Parent: facts.NoID}},
-		Occurrences: []facts.Occurrence{{
-			ID:         1,
-			Descriptor: facts.Descriptor{Prefix: c, Suffix: "pkg/Type#method()."},
-			Role:       facts.RoleDefinition,
-			SymbolKind: facts.KindMethod,
-			Name:       "method",
-			RangeStart: 7,
-			RangeEnd:   13,
-			Scope:      1,
-		}},
-		Edges: []facts.Edge{
-			{Kind: facts.EdgeDefines, Source: facts.FileRef(), Target: facts.OccurrenceRef(1)},
-			{Kind: facts.EdgeContains, Source: facts.ScopeRef(1), Target: facts.OccurrenceRef(1)},
-			{Kind: facts.EdgeReferencesLocal, Source: facts.OccurrenceRef(1), Target: facts.OccurrenceRef(1)},
-		},
-		ParseError: "parse error at 1:1",
-	}
-
-	got := checkpoint(t, ff)
-	assert.Equal(t, ff, got)
-	// Stated separately because it is the one value the reduce branches on, and
-	// an empty-string ParseError would silently turn a poison file into a good
-	// one that deletes its own graph (mapFiles).
-	assert.Equal(t, ff.ParseError, got.ParseError)
-	assert.Equal(t, ff.Occurrences[0].Descriptor.String(), got.Occurrences[0].Descriptor.String(),
-		"the descriptor is the link pass's only join key")
 }
 
 // TestSkipSurvivesACheckpoint pins what a Skip is allowed to lose.

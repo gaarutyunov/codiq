@@ -1,0 +1,30 @@
+# buf codegen for the fact artifact (SPEC.md §4.1, Decision 3: "buf generates
+# Go").
+#
+# One plugin: protoc-gen-go. There is no service in this schema and never will
+# be — an artifact is a file on a shared volume that one process writes and
+# another reads (§10), not an RPC — so protoc-gen-go-grpc and connect have
+# nothing to generate.
+#
+# Output lands in artifact/proto/, which is where SPEC.md §12 and §14 M5 put the
+# buf-generated Go, beside the codec that maps it to facts.
+version: v2
+
+managed:
+  enabled: true
+  override:
+    # The go_package the generator writes into the .proto already says this;
+    # stating it here too is what makes `buf generate` correct on its own, so a
+    # regenerated .proto and a regenerated .pb.go cannot disagree about where
+    # the package lives.
+    - file_option: go_package_prefix
+      value: github.com/gaarutyunov/codiq/artifact/proto
+
+plugins:
+  - local: protoc-gen-go
+    out: artifact/proto
+    opt:
+      # source_relative, so codiq/facts/v1/facts.proto becomes
+      # artifact/proto/codiq/facts/v1/facts.pb.go rather than being nested under
+      # the full module path a second time.
+      - paths=source_relative

@@ -45,10 +45,8 @@ import (
 	"testing"
 
 	"github.com/cucumber/godog"
-	"github.com/jackc/pgx/v5/pgxpool"
 	mcpsdk "github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/stretchr/testify/assert"
-	"github.com/stretchr/testify/require"
 
 	"github.com/gaarutyunov/codiq/index"
 )
@@ -67,22 +65,17 @@ const refusalConstraint = "codiq_test_refuses_type"
 // TestM4Features is the godog entry point for M4, scoped to its own feature file
 // so that each milestone's suite owns the scenarios it has steps for.
 //
-// It stands up a stack of its own for the reason m2_test.go gives: the whole
-// graph is inside several assertions below, so another suite's corpus must not
-// be. The gopgql image is built under a fixed tag with KeepImage, so this is a
-// cache hit rather than a fourth `go install`.
+// The stack it runs against is the package's (m1_test.go's startStack), brought
+// up by whichever suite ran first. The whole graph is inside several assertions
+// below, so no other suite's corpus may be in the database when they run — which
+// is what the Background is for, and was true of the scenario before this one
+// long before it was true of the suite before this one.
 func TestM4Features(t *testing.T) {
 	ctx := context.Background()
 	repoRoot = mustRepoRoot(t)
 	m3Log = t
 
 	startStack(t, ctx)
-
-	dbosDSN, err := dbosConnString(connString)
-	require.NoError(t, err)
-	dbosPool, err = pgxpool.New(ctx, dbosDSN)
-	require.NoError(t, err, "open %s pool", dbosDBName)
-	t.Cleanup(dbosPool.Close)
 
 	suite := godog.TestSuite{
 		Name:                "m4",
@@ -349,7 +342,8 @@ func (st *m4State) codiq(ctx context.Context) error {
 		return err
 	}
 	var stdout, stderr bytes.Buffer
-	cmd := exec.CommandContext(ctx, m3Bin, "-dsn", connString, "-dbos-dsn", dbosDSN, "-v", st.repo)
+	cmd := exec.CommandContext(ctx, codiqBin, "-dsn", connString, "-dbos-dsn", dbosDSN, "-v", st.repo)
+	cmd.Env = codiqEnv()
 	cmd.Stdout, cmd.Stderr = &stdout, &stderr
 	runErr := cmd.Run()
 	st.report, st.log = stdout.String(), stderr.String()

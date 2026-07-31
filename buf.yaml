@@ -1,0 +1,58 @@
+# buf module for the fact artifact's protobuf schema (SPEC.md §4.1, Decision 3).
+#
+# The module root is schema/proto/, not the repository root: SPEC.md §12 puts
+# the generated .proto under schema/ beside the SDL and the migrations, and
+# scoping the module there keeps buf's package-directory rule meaningful —
+# `codiq.facts.v1` must live at `codiq/facts/v1/`, which is only true relative
+# to schema/proto/.
+#
+# Nothing under schema/proto/ is hand-written; artifact/protogen emits it from
+# schema/codiq.graphql. Regenerate and rebuild the Go with, from the repository
+# root:
+#
+#     go install github.com/bufbuild/buf/cmd/buf@v1.59.0
+#     go install google.golang.org/protobuf/cmd/protoc-gen-go@v1.36.11
+#     go run ./artifact/protogen
+#     buf generate
+#
+# The two tool versions are pinned here rather than promoted to `go get -tool`
+# dependencies for the reason store/sqlc/sqlc.yaml gives for sqlc: the generated
+# files are committed and CI does not regenerate them, so a different buf would
+# produce a diff nobody asked for, and pinning in go.mod would drag both build
+# trees into this module's graph.
+version: v2
+
+modules:
+  - path: schema/proto
+
+lint:
+  # STANDARD is buf's full recommended set: PACKAGE_VERSION_SUFFIX, the
+  # ENUM_VALUE_PREFIX / ENUM_ZERO_VALUE_SUFFIX rules that make an enum value
+  # unambiguous in C++ scoping, PACKAGE_DIRECTORY_MATCH, and the naming cases.
+  # artifact/protogen emits schema that satisfies it, so a lint failure here is
+  # a generator defect and is meant to be read as one.
+  use:
+    - STANDARD
+
+breaking:
+  # Decision 3: buf "enforces lint + breaking-change checks (which reinforce
+  # §4.6 versioning)". WIRE_JSON is the right level for this schema and not the
+  # stricter FILE: an artifact is read back only by the process generation that
+  # wrote it or by its successor across a resume, so what must never change is
+  # the *encoding* — a field's number, its type, an enum value's number. Go
+  # symbol names may move, because the only consumer is artifact/codec.go, which
+  # is regenerated in the same commit.
+  #
+  # Run it against the merge base, from the repository root:
+  #
+  #     buf breaking --against '.git#branch=main,subdir=.'
+  #
+  # That reports "Module had no .proto files" until schema/proto exists on the
+  # base branch, which is true for exactly one commit — this one. `buf breaking
+  # --against .` checks the mechanism in the meantime and passes.
+  #
+  # A change this refuses is exactly the change §4.6 says to reconcile with an
+  # encoding version rather than a destructive rebuild: bump, re-encode
+  # out-of-band, do not renumber in place.
+  use:
+    - WIRE_JSON

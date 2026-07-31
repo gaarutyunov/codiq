@@ -3,8 +3,7 @@
 # M1 was postgres + gopgql and nothing else: the SDL is the product, gopgql owns
 # the schema and the read surface, and rows were inserted by hand. M2 adds the
 # `codiq` ingestion service, which is where rows start coming from source code.
-# The shared `artifacts` volume becomes relevant at M5 and is stubbed out below
-# so it slots in without a reshuffle.
+# M5 adds the shared `artifacts` volume the map phase spills facts to.
 #
 #   postgres   PostgreSQL 19 with SQL/PGQ. The only stateful piece.
 #   migrate    one-shot: applies schema/migrations/ with goose, then exits.
@@ -167,8 +166,28 @@ services:
       # The graph pool and the checkpoint pool are two databases on purpose (§9
       # "Isolation"); the binary refuses to start without both.
       DBOS_DATABASE_URL: *dbos-database-url
+      # Since M5 the map phase writes each file's facts to the shared volume as
+      # a protobuf artifact and checkpoints only the key (§5, §10). The binary
+      # has a default for this, so setting it is not what makes the run work —
+      # it is what makes the artifacts land on the *volume* below rather than on
+      # the container's own writable layer, which is what "shared" means and
+      # what a resumed run needs (see the volume's note).
+      CODIQ_ARTIFACT_DIR: /artifacts
     volumes:
       - ../extract/golang/testdata/greeter:/repo:ro
+      # §10's shared local volume: the map writers and the reduce reader both
+      # mount it. Here that is one container, because `codiq` is one process —
+      # but it is also the *same* volume the next `run --rm codiq` mounts, which
+      # is the case that matters. A run killed after its map phase leaves its
+      # artifacts here, and the run that continues it consumes them instead of
+      # re-parsing every file (§6, §14 M5). On a container-local path that
+      # property would quietly disappear, because `run --rm` throws the writable
+      # layer away.
+      #
+      # Not `:ro` anywhere and not shared with another service: ingestion is the
+      # only writer and the only reader. Under Kubernetes this becomes a
+      # ReadWriteMany PVC (§16) and nothing in the application changes.
+      - artifacts:/artifacts
     command: ["codiq", "/repo"]
 
   # The read surface (§8): GraphQL compiled to SQL/PGQ, served over MCP. CodiQ
@@ -198,18 +217,15 @@ services:
       timeout: 3s
       retries: 20
 
-  # --- Not yet ---------------------------------------------------------------
-  #
-  # M5 adds the protobuf artifacts on a shared volume (§10) — the local stand-in
-  # for the ReadWriteMany PVC that replaces it under Kubernetes (§16). An
-  # addition to the `codiq` service above, not a new service:
-  #
-  # codiq:
-  #   environment:
-  #     CODIQ_ARTIFACT_DIR: /artifacts           # from M5
-  #   volumes:
-  #     - artifacts:/artifacts                   # from M5
-
 volumes:
   pgdata:
-  # artifacts:   # from M5
+  # The map phase's protobuf artifacts (§10, §14 M5) — the local stand-in for
+  # the ReadWriteMany PVC that replaces it under Kubernetes (§16).
+  #
+  # It survives `down` and is removed by `down -v`, which is the right way round:
+  # the artifacts of a batch whose reduce failed are meant to outlive the
+  # process (§6, Decision 16), and `down -v` is already the "throw the database
+  # away too" verb. Nothing sweeps it — a successful reduce deletes its own
+  # batch, and an abandoned batch's artifacts are reclaimed by the next index of
+  # the same tree, which writes over them (artifact.Key).
+  artifacts:

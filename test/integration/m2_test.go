@@ -9,18 +9,20 @@
 // scenarioState, which is embedded so that the MCP handshake and the
 // "asks over MCP" / "the answer is" steps are literally M1's code.
 //
-// What it does not share is the *database*. M1 and M2 stand up one stack each,
-// for two reasons: M1's suite tears its own down when TestFeatures returns, and
-// deploy/seed/seed.sql's corpus would otherwise be inside every whole-graph
-// assertion M2 makes. The gopgql image is built under a fixed tag with
-// KeepImage, so the second build is a cache hit rather than another `go install`.
+// It does not share the database's *contents*: deploy/seed/seed.sql's corpus
+// would otherwise be inside every whole-graph assertion M2 makes. Up to M4 that
+// was arranged by standing up a second stack; since M5 it is arranged by the
+// Background, which truncates before each scenario and had to exist anyway to
+// isolate the scenarios from each other (startStack says why the stacks were
+// collapsed into one).
 //
 // The indexer is driven as the `cmd/codiq` binary rather than by calling
 // index.Run, because the binary is part of what M2 ships: its walk, its flag
 // handling and its report are otherwise never exercised end to end, and the
 // report is where "a skipped file is visible" is actually visible. It is built
-// once for the suite and run against the host-mapped DSN, which is the same
-// program the compose `codiq` service runs with the same arguments.
+// once for the package (m3_test.go's TestMain) and run against the host-mapped
+// DSN, which is the same program the compose `codiq` service runs with the same
+// arguments.
 package integration
 
 import (
@@ -40,7 +42,6 @@ import (
 	"github.com/cucumber/godog"
 	mcpsdk "github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/stretchr/testify/assert"
-	"github.com/stretchr/testify/require"
 )
 
 // coreTables is every table the model has (schema/codiq.graphql), base first
@@ -59,9 +60,6 @@ var coreTables = []string{
 // rewrite the module.
 var greeterFixture = filepath.Join("extract", "golang", "testdata", "greeter")
 
-// codiqBin is the cmd/codiq binary, built once for the suite.
-var codiqBin string
-
 // TestM2Features is the godog entry point for M2, scoped to its own feature file
 // so that each milestone's suite owns the scenarios it has steps for.
 func TestM2Features(t *testing.T) {
@@ -69,7 +67,6 @@ func TestM2Features(t *testing.T) {
 	repoRoot = mustRepoRoot(t)
 
 	startStack(t, ctx)
-	codiqBin = buildCodiq(t)
 
 	suite := godog.TestSuite{
 		Name:                "m2",
@@ -84,20 +81,6 @@ func TestM2Features(t *testing.T) {
 	if suite.Run() != 0 {
 		t.Fatal("m2 feature scenarios failed")
 	}
-}
-
-// buildCodiq compiles cmd/codiq into the test's temp directory. `go build` and
-// not `go run`, so a compile error is one failure at suite start rather than one
-// per scenario, and so the thing under test is a binary rather than a toolchain
-// invocation.
-func buildCodiq(t *testing.T) string {
-	t.Helper()
-	bin := filepath.Join(t.TempDir(), "codiq")
-	cmd := exec.Command("go", "build", "-o", bin, "./cmd/codiq")
-	cmd.Dir = repoRoot
-	out, err := cmd.CombinedOutput()
-	require.NoErrorf(t, err, "go build ./cmd/codiq:\n%s", out)
-	return bin
 }
 
 // m2State is one scenario's state. It embeds M1's scenarioState for the MCP
@@ -268,6 +251,7 @@ func (st *m2State) moduleIndexed(ctx context.Context) error {
 		return err
 	}
 	cmd := exec.CommandContext(ctx, codiqBin, "-dsn", connString, "-dbos-dsn", dbosDSN, "-v", st.repo)
+	cmd.Env = codiqEnv()
 	out, err := cmd.CombinedOutput()
 	st.report = string(out)
 	if err != nil {

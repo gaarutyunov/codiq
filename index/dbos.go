@@ -1,11 +1,11 @@
-// DBOS orchestration for the loader (SPEC.md §9, §14 M4).
+// DBOS orchestration for the loader (SPEC.md §9, §14 M4, M5).
 //
 // index.go is M2: one process walks a tree, loads every file in its own
 // transaction, rebuilds the edges, and if it dies halfway the next run starts
 // from nothing. This file is the same pipeline expressed as SPEC.md §9's
 // map-reduce batch: a parent workflow freezes the file list, enqueues one
-// *extract workflow per file* on the durable "extract" queue, gathers the facts
-// they produce, and hands the successful subset to a single reduce step that
+// *extract workflow per file* on the durable "extract" queue, gathers what they
+// produce, and hands the successful subset to a single reduce step that
 // writes the whole batch in one transaction (reduce.go). Nothing about *what*
 // is loaded changes — the same walk, the same extract, the same ReplaceFile and
 // the same RebuildAll, in the same order.
@@ -36,6 +36,18 @@
 //
 // What DBOS deliberately does *not* take over is the transaction; reduce.go's
 // comment has that argument in full.
+//
+// M5 changes exactly one thing about the above, and it is the thing §5 asks
+// for: what a map task returns. Up to M4 it returned a facts.FileFacts, so
+// every file's facts were serialised into `codiq_dbos` twice — once as the
+// extract step's output and once as the task's — and the batch held all of them
+// in RAM until the reduce. Now the task writes a protobuf artifact to the
+// shared volume (§10) and returns its *key*, which is what §5 means by "the map
+// task checkpoints the artifact key, never the blob"; the reduce reads the
+// artifacts back one at a time inside its transaction and deletes them when it
+// commits (reduce.go, Decision 16). Nothing about the step *sequence* moves —
+// the determinism argument in mapFiles is untouched — but the recorded payloads
+// change type, which is why WorkflowVersion is bumped.
 package index
 
 import (
@@ -52,8 +64,8 @@ import (
 	"github.com/dbos-inc/dbos-transact-golang/dbos"
 	"github.com/google/uuid"
 
+	"github.com/gaarutyunov/codiq/artifact"
 	"github.com/gaarutyunov/codiq/coord"
-	"github.com/gaarutyunov/codiq/facts"
 	"github.com/gaarutyunov/codiq/store"
 )
 
@@ -124,12 +136,29 @@ const queuePollInterval = 10 * time.Millisecond
 // So the version is a constant, and it names the *step sequence*, not the
 // build. Bump it when a change to IndexRepo would make an in-flight workflow
 // unreplayable — a step added, removed or reordered — and leave it alone for
-// everything else. M4 is exactly such a change: M3's run was resolve, one load
+// everything else. M4 was exactly such a change: M3's run was resolve, one load
 // per file, link; M4's is resolve, walk, one enqueue and one await per file,
 // reduce. An M3 workflow left PENDING cannot be replayed against this code and
-// must not be, hence `-2`. An operator can still override it per-process with
+// must not be. An operator can still override it per-process with
 // DBOS__APPVERSION.
-const WorkflowVersion = "codiq-index-2"
+//
+// M5 moves it again, to `-3`, and the reason is worth spelling out because the
+// step *sequence* is unchanged. What changed is the recorded payload's type:
+// the `extract:` step and the map task both used to record a facts.FileFacts
+// and now record an `extracted`. Those two are both JSON objects, so an M4
+// checkpoint replayed against this code would not fail — it would decode into
+// an `extracted` whose every field is absent, which is a map task reporting a
+// file with no artifact and no parse error. The batch would then load nothing
+// and report success. A silently empty index is the worst available outcome, so
+// the version has to make those checkpoints unreachable rather than merely
+// unlikely.
+//
+// What that costs is the in-flight M4 runs: a workflow left PENDING by an M4
+// binary is not recovered by an M5 one, and stays PENDING until somebody runs
+// the old build or clears it. That is the same price M4 paid, and it is the
+// right one here — the alternative is not "those runs finish", it is "those runs
+// finish wrong".
+const WorkflowVersion = "codiq-index-3"
 
 // RunIDPrefix is the prefix shared by the workflow IDs of every index of target,
 // which must be an absolute path. NewRunID mints one; a caller finds an
@@ -190,24 +219,34 @@ var registered atomic.Pointer[registration]
 // itself when it finds one. The same call on root is a plain query against the
 // system database. reviveCancelled is why that distinction is needed.
 type registration struct {
-	db   DB
-	l    loader
+	db DB
+	l  loader
+	// art is the shared volume the map phase spills facts to (SPEC.md §10,
+	// §14 M5). It sits beside db rather than inside loader because it is a
+	// resource the process was given — a directory — and not one of the
+	// collaborators a test substitutes; a test points it at t.TempDir().
+	art  *artifact.Store
 	root dbos.DBOSContext
 }
 
-// Register binds the workflows to a database and registers them, and the
-// "extract" queue, with DBOS.
+// Register binds the workflows to a database and an artifact store and
+// registers them, and the "extract" queue, with DBOS.
 //
-// The three happen together on purpose: a workflow registered without a handle
-// to load through is one that panics on recovery instead of at startup, and the
-// window between them is exactly the window dbos.Launch recovers in.
+// They happen together on purpose: a workflow registered without a handle to
+// load through is one that panics on recovery instead of at startup, and the
+// window between them is exactly the window dbos.Launch recovers in. The
+// artifact store is in the same position from M5 — a recovered map task writes
+// to it before anything else in this package runs.
 //
 // Call it once, before dbos.Launch — DBOS registers a workflow by code pointer
 // and panics on a second registration of the same function, and Launch is what
 // starts the queue's workers and recovers this executor's unfinished runs.
-func Register(ctx dbos.DBOSContext, db DB) error {
+func Register(ctx dbos.DBOSContext, db DB, art *artifact.Store) error {
+	if art == nil {
+		return errors.New("index: Register needs an artifact store")
+	}
 	l := defaultLoader()
-	registered.Store(&registration{db: db, l: l, root: ctx})
+	registered.Store(&registration{db: db, l: l, art: art, root: ctx})
 	dbos.RegisterWorkflow(ctx, IndexRepo, dbos.WithWorkflowName(WorkflowName))
 	dbos.RegisterWorkflow(ctx, extractFile, dbos.WithWorkflowName(ExtractWorkflowName))
 
@@ -282,7 +321,7 @@ func (reg *registration) indexRepo(ctx dbos.DBOSContext, repo string) (Result, e
 
 	res := Result{Coord: s.Coord, Files: len(paths), Concurrency: reg.l.limit}
 
-	batch, skipped, err := reg.mapFiles(ctx, s, paths)
+	keys, skipped, err := reg.mapFiles(ctx, s, paths)
 	// The skips are reported even when the map phase failed outright: they are
 	// the run's findings about the tree, and a caller that has to retry deserves
 	// to know which files it will be told about again.
@@ -292,18 +331,23 @@ func (reg *registration) indexRepo(ctx dbos.DBOSContext, repo string) (Result, e
 	}
 
 	// One reduce, after the last map task, and one transaction inside it
-	// (SPEC.md §6). Loaded and Retries are set from the step's own output rather
-	// than counted here, so a replay of a finished reduce reports what the
-	// original reduce did instead of recomputing it — and so that a *failed*
-	// reduce reports nothing loaded, which is exactly true: the transaction
-	// rolled back and the graph is as it was.
+	// (SPEC.md §6). It is handed keys rather than facts from M5 on: the batch
+	// this workflow carries between the two phases is now len(keys) strings
+	// instead of len(keys) parsed files, which is what takes the memory ceiling
+	// off the batch size (reduce.go's note).
+	//
+	// Loaded and Retries are set from the step's own output rather than counted
+	// here, so a replay of a finished reduce reports what the original reduce
+	// did instead of recomputing it — and so that a *failed* reduce reports
+	// nothing loaded, which is exactly true: the transaction rolled back and the
+	// graph is as it was.
 	retries, err := dbos.RunAsStep(ctx, func(sctx context.Context) (int, error) {
-		return reg.reduce(sctx, batch)
+		return reg.reduce(sctx, keys)
 	}, dbos.WithStepName("reduce"))
 	if err != nil {
 		return res, err
 	}
-	res.Loaded, res.Retries = len(batch), retries
+	res.Loaded, res.Retries = len(keys), retries
 	return res, nil
 }
 
@@ -324,8 +368,35 @@ type fileRef struct {
 	Coord coord.Coord `json:"coord"`
 }
 
-// extractFile is the map task: parse one file, checkpoint its facts (SPEC.md §5,
-// §14 M4).
+// extracted is one map task's output, and the whole of what M5 lets cross a
+// checkpoint (SPEC.md §5, §14 M5).
+//
+// Two fields, and neither is the facts. Key names the artifact the task wrote to
+// the shared volume; ParseError is set instead when there is no artifact to
+// name, because the file could not be parsed.
+//
+// A poison file gets no artifact on purpose. An artifact is a thing the reduce
+// loads, and loading a FileFacts with a ParseError would delete a previously
+// good file's graph and put nothing back (store.ErrParseFailed's doc) — so an
+// artifact the reduce must never read is a footgun on a shared volume, and one
+// nothing would ever collect. What is worth keeping about the failure is the
+// message, and the message is what travels.
+//
+// Both fields are small and bounded — a key is 69 bytes and a parse error is a
+// line of text — which is the property §5 asks for. The JSON tags are explicit
+// because this shape is written into `codiq_dbos` and read back by a later
+// process (see WorkflowVersion).
+type extracted struct {
+	// Key is the artifact.Key of the facts this task produced, or empty when
+	// ParseError says why there are none.
+	Key string `json:"key,omitempty"`
+	// ParseError is the extractor's message for a file it could not parse
+	// (SPEC.md §5's poison file). Empty on success.
+	ParseError string `json:"parse_error,omitempty"`
+}
+
+// extractFile is the map task: parse one file, write its artifact, checkpoint
+// the key (SPEC.md §5, §14 M5).
 //
 // It is a *workflow* and not a step because a durable queue carries workflows —
 // dbos.WithQueue is a WorkflowOption — and §9 puts the per-file tasks on a
@@ -335,46 +406,63 @@ type fileRef struct {
 //
 // It must stay a top-level function: DBOS identifies a workflow by its code
 // pointer (see this file's package comment).
-func extractFile(ctx dbos.DBOSContext, ref fileRef) (facts.FileFacts, error) {
+func extractFile(ctx dbos.DBOSContext, ref fileRef) (extracted, error) {
 	reg := registered.Load()
 	if reg == nil {
-		return facts.FileFacts{}, errors.New("index: extractFile ran before index.Register")
+		return extracted{}, errors.New("index: extractFile ran before index.Register")
 	}
 	return reg.extract(ctx, ref)
 }
 
-// extract runs the parse inside a step.
+// extract runs the parse and the artifact write inside one step.
 //
-// The step is not redundant with the workflow around it. Reading and parsing is
-// the non-deterministic part — it touches the filesystem — and DBOS's contract
-// is that such work lives in a step, so a task that dies after parsing and
-// before recording its own output replays from the checkpoint instead of
-// re-reading a file that may have changed underneath it.
+// The step is not redundant with the workflow around it. Reading, parsing and
+// writing to the volume is the non-deterministic part — it touches the
+// filesystem — and DBOS's contract is that such work lives in a step, so a task
+// that dies after writing its artifact and before recording the key replays
+// from the checkpoint instead of re-reading a file that may have changed
+// underneath it.
 //
-// It does cost a second copy of the facts: they are recorded once as the step's
-// output and once as the workflow's. That is the M4 shape and it is temporary by
-// design — SPEC.md §5 says "the map task checkpoints the artifact *key*, never
-// the blob", which is M5's protobuf-on-a-shared-volume and the whole reason M5
-// exists. At M4 the facts travel in memory (§14 M4) and the checkpoint is the
-// only place they are durable.
+// M4 paid for that step with a second copy of the facts, recorded once as the
+// step's output and once as the workflow's. Both copies are now the same 69-byte
+// key, which is the whole of §5's "checkpoints the artifact key, never the
+// blob": the facts go to the volume once and to `codiq_dbos` never.
+//
+// The write and the parse are deliberately in the *same* step rather than in
+// two. Splitting them would mean the facts crossing a checkpoint between them,
+// which is the thing this milestone exists to stop; keeping them together costs
+// a re-parse when a task dies mid-write, which is cheap and idempotent
+// (artifact.Store.Write).
 //
 // A parse failure is not an error here. facts.FileFacts carries ParseError
 // precisely so the failure can travel *with* the facts; returning it as an error
 // would make the map task fail, and the parent has to tell "this file is poison"
 // apart from "this task broke" to report the first properly (see mapFiles).
-func (reg *registration) extract(ctx dbos.DBOSContext, ref fileRef) (facts.FileFacts, error) {
+func (reg *registration) extract(ctx dbos.DBOSContext, ref fileRef) (extracted, error) {
 	// The path the extractor sees has to be the walk's own form — absolute,
 	// platform-separated — because coord.Coord.Namespace resolves against it;
 	// the checkpoint holds the repo-relative form because that is what the
-	// `file` table holds and what makes the checkpoint readable.
+	// `file` table holds, what makes the checkpoint readable, and what the
+	// artifact key is computed over.
 	path := filepath.Join(ref.Root, filepath.FromSlash(ref.Path))
-	return dbos.RunAsStep(ctx, func(context.Context) (facts.FileFacts, error) {
-		return reg.l.extract(ref.Root, path, ref.Coord)
+	return dbos.RunAsStep(ctx, func(sctx context.Context) (extracted, error) {
+		ff, err := reg.l.extract(ref.Root, path, ref.Coord)
+		if err != nil {
+			return extracted{}, err
+		}
+		if ff.ParseError != "" {
+			return extracted{ParseError: ff.ParseError}, nil
+		}
+		key := artifact.Key(ref.Root, ref.Path)
+		if err := reg.art.Write(sctx, key, ff); err != nil {
+			return extracted{}, err
+		}
+		return extracted{Key: key}, nil
 	}, dbos.WithStepName("extract:"+ref.Path))
 }
 
 // mapFiles enqueues one extract task per file and gathers what they produced:
-// the batch the reduce will load, and the files that will not be in it.
+// the artifact keys the reduce will load, and the files that will not be in it.
 //
 // **Both loops run in path order on the workflow's own goroutine, and that is
 // the whole determinism argument.** DBOS numbers a child workflow by the step ID
@@ -399,9 +487,9 @@ func (reg *registration) extract(ctx dbos.DBOSContext, ref fileRef) (facts.FileF
 // §9's "the batch proceeds over the successful subset"). §14 M4 writes it as
 // `if err { markPoison(f); continue }` and two of the cases below are that
 // line: the task errored, or it came back carrying a parse error. Neither is
-// allowed to reach the reduce — a FileFacts with a ParseError has empty row
-// slices, so loading it would delete a good file's graph and put nothing back
-// (store's ErrParseFailed doc) — and neither is allowed to stop the batch.
+// allowed to reach the reduce — a poison file has no artifact at all from M5,
+// precisely because loading one would delete a good file's graph and put nothing
+// back (store's ErrParseFailed doc) — and neither is allowed to stop the batch.
 //
 // **A cancelled task is neither, and that is the third case.** Stopping the
 // process cancels this workflow *and* the map tasks the queue had in flight,
@@ -423,8 +511,8 @@ func (reg *registration) extract(ctx dbos.DBOSContext, ref fileRef) (facts.FileF
 //
 // The returned skips are in path order without being sorted, because paths is
 // the walk's sorted output and both loops follow it.
-func (reg *registration) mapFiles(ctx dbos.DBOSContext, s site, paths []string) ([]facts.FileFacts, []Skip, error) {
-	handles := make([]dbos.WorkflowHandle[facts.FileFacts], 0, len(paths))
+func (reg *registration) mapFiles(ctx dbos.DBOSContext, s site, paths []string) ([]string, []Skip, error) {
+	handles := make([]dbos.WorkflowHandle[extracted], 0, len(paths))
 	for _, rel := range paths {
 		h, err := dbos.RunWorkflow(ctx, extractFile,
 			fileRef{Root: s.Root, Path: rel, Coord: s.Coord},
@@ -439,11 +527,11 @@ func (reg *registration) mapFiles(ctx dbos.DBOSContext, s site, paths []string) 
 		return nil, nil, err
 	}
 
-	batch := make([]facts.FileFacts, 0, len(handles))
+	keys := make([]string, 0, len(handles))
 	var skipped []Skip
 	for i, h := range handles {
 		rel := paths[i]
-		ff, err := h.GetResult()
+		out, err := h.GetResult()
 		switch {
 		case cancelled(err):
 			// Not a verdict on the file: the run is being stopped. Returning
@@ -454,17 +542,23 @@ func (reg *registration) mapFiles(ctx dbos.DBOSContext, s site, paths []string) 
 			// The task itself failed: an unreadable file, a grammar that would
 			// not load, a worker that died past its retries. Flagged, not fatal.
 			skipped = append(skipped, Skip{Path: rel, Err: fmt.Errorf("index: extract %s: %w", rel, err)})
-		case ff.ParseError != "":
+		case out.ParseError != "":
 			// The task succeeded and reported the file unparseable. The sentinel
 			// is minted here rather than carried, because an error does not
-			// survive a checkpoint as an error; what crossed was the string on
-			// the facts.
-			skipped = append(skipped, Skip{Path: rel, Err: fmt.Errorf("%w (%s): %s", store.ErrParseFailed, rel, ff.ParseError)})
+			// survive a checkpoint as an error; what crossed was the string.
+			skipped = append(skipped, Skip{Path: rel, Err: fmt.Errorf("%w (%s): %s", store.ErrParseFailed, rel, out.ParseError)})
+		case out.Key == "":
+			// Neither an artifact nor a reason. Unreachable from extract, which
+			// returns one or the other, so this can only be a checkpoint written
+			// by a build whose `extracted` was a different shape — the failure
+			// WorkflowVersion's `-3` exists to make unreachable. Loud rather than
+			// silent, because the silent version of it is an empty index.
+			return nil, skipped, fmt.Errorf("index: extract %s: task reported neither an artifact nor a parse error", rel)
 		default:
-			batch = append(batch, ff)
+			keys = append(keys, out.Key)
 		}
 	}
-	return batch, skipped, nil
+	return keys, skipped, nil
 }
 
 // cancelled reports whether awaiting a map task failed because something was
@@ -516,7 +610,7 @@ func cancelled(err error) bool {
 //
 // A run with nothing cancelled pays one indexed query over the run's own
 // workflow IDs, which is the cost of not having to know whether it is a resume.
-func (reg *registration) reviveCancelled(handles []dbos.WorkflowHandle[facts.FileFacts]) error {
+func (reg *registration) reviveCancelled(handles []dbos.WorkflowHandle[extracted]) error {
 	if len(handles) == 0 {
 		return nil
 	}
@@ -526,7 +620,8 @@ func (reg *registration) reviveCancelled(handles []dbos.WorkflowHandle[facts.Fil
 	}
 	// Neither payload is wanted: the inputs are this loop's own fileRefs and the
 	// outputs are a cancelled task's, which is to say absent. Asking for them
-	// would drag the whole run's facts through this query.
+	// would drag the whole run's map-task payloads through this query — which
+	// mattered rather more before M5 made those payloads a key each.
 	stalled, err := dbos.ListWorkflows(reg.root,
 		dbos.WithWorkflowIDs(ids),
 		dbos.WithStatus([]dbos.WorkflowStatusType{dbos.WorkflowStatusCancelled}),
@@ -545,7 +640,7 @@ func (reg *registration) reviveCancelled(handles []dbos.WorkflowHandle[facts.Fil
 	// Back onto "extract" rather than DBOS's internal queue, so a resumed task
 	// is admitted under the same concurrency budget as every other map task and
 	// Result.Concurrency keeps saying something true.
-	if _, err := dbos.ResumeWorkflows[facts.FileFacts](reg.root, revive,
+	if _, err := dbos.ResumeWorkflows[extracted](reg.root, revive,
 		dbos.WithResumeQueue(QueueName)); err != nil {
 		return fmt.Errorf("index: resume %d cancelled map tasks: %w", len(revive), err)
 	}

@@ -12,7 +12,8 @@
 // Two things it does add, because M3 has no way to assert its claims without
 // them:
 //
-//   - A second pool, on the DBOS system database. A workflow's status and its
+//   - A second pool, on the DBOS system database (opened with the stack since
+//     M5, but this is the milestone that needs it). A workflow's status and its
 //     step ledger are the only places "this run died rather than finished" and
 //     "this file's work is durable" are written down, and neither is in the
 //     graph or reachable over MCP. Every navigation claim below still goes
@@ -49,7 +50,6 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	mcpsdk "github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/stretchr/testify/assert"
-	"github.com/stretchr/testify/require"
 
 	"github.com/gaarutyunov/codiq/index"
 )
@@ -67,17 +67,35 @@ const (
 	// checkpointWait bounds that wait.
 	checkpointWait = 3 * time.Minute
 	// indexWait bounds a run that is expected to finish on its own.
-	indexWait = 5 * time.Minute
+	//
+	// It is a backstop and not a budget, and the distinction is worth writing
+	// down because the number looks arbitrary otherwise. A 152-file index costs
+	// the database a handful of seconds of real work; what it costs in wall
+	// time depends on how much CPU the host has left, and the host is running
+	// the indexer, the test process and postgres at once. Measured on a
+	// four-core machine, the cancel-and-resume scenario runs two whole-graph
+	// link rebuilds that overlap in postgres — the cancelled run's query keeps
+	// executing until it finishes, because postgres does not notice the client
+	// is gone until it next writes to the socket — and that pair took 72-80
+	// seconds with the host otherwise idle, and past four minutes with it busy.
+	//
+	// So the failure this bounds is "the run is wedged", which is a state that
+	// never resolves, and ten minutes says that as well as five while leaving
+	// room for a loaded machine to be slow without being wrong. Tuning it *down*
+	// towards the observed time would turn a busy host into a red suite, which
+	// is a worse failure than a slow one: it reports a bug that is not there.
+	indexWait = 10 * time.Minute
 	// exitWait is how long a signalled process is given to go away. Generous
 	// for SIGTERM's sake: that path runs dbos.Shutdown on the way out, which
 	// has a timeout of its own (cmd/codiq shutdownTimeout).
 	exitWait = time.Minute
 )
 
-// m3Bin is cmd/codiq, built once for the package in TestMain.
-var m3Bin string
+// codiqBin is cmd/codiq, built once for the package in TestMain and run by
+// every suite from M2 on.
+var codiqBin string
 
-// dbosPool is a pool on dbosDBName, opened by TestM3Features.
+// dbosPool is a pool on dbosDBName, opened with the stack (m1_test.go).
 var dbosPool *pgxpool.Pool
 
 // m3Log is the suite's *testing.T, so that the durability steps can record what
@@ -103,15 +121,22 @@ func m3Logf(format string, args ...any) {
 	m3Log.Logf(format, args...)
 }
 
-// TestMain builds the binary the M3 scenarios exec.
+// TestMain builds the binary the scenarios exec, and owns the stack's lifetime.
 //
-// In TestMain rather than at the top of the suite so that the same executable
-// backs every scenario, including the ones that kill one process and expect
-// another to pick up what it left. DBOS recovers a workflow only for a matching
-// application version, and index.WorkflowVersion is a constant rather than the
-// default hash of the running binary — so a rebuild between the two halves is
-// in fact harmless, and this is here to keep the suite from depending on that
-// being true.
+// The binary is built here rather than at the top of a suite so that the same
+// executable backs every scenario, including the ones that kill one process and
+// expect another to pick up what it left. DBOS recovers a workflow only for a
+// matching application version, and index.WorkflowVersion is a constant rather
+// than the default hash of the running binary — so a rebuild between the two
+// halves is in fact harmless, and this is here to keep the suite from depending
+// on that being true. From M5 it is also the *only* build: M2 used to compile
+// cmd/codiq a second time into its own temp directory, which was a second copy
+// of the same bytes.
+//
+// The stack is taken down here for the reason startStack gives: it is shared by
+// every suite, so there is no single milestone's *testing.T whose Cleanup could
+// own it. stopStack after m.Run and before Exit, so the containers are gone
+// whether the package passed or failed.
 func TestMain(m *testing.M) {
 	root, err := repoRootFromWD()
 	if err != nil {
@@ -123,8 +148,8 @@ func TestMain(m *testing.M) {
 		fmt.Fprintf(os.Stderr, "integration: %v\n", err)
 		os.Exit(1)
 	}
-	m3Bin = filepath.Join(dir, "codiq")
-	build := exec.Command("go", "build", "-o", m3Bin, "./cmd/codiq")
+	codiqBin = filepath.Join(dir, "codiq")
+	build := exec.Command("go", "build", "-o", codiqBin, "./cmd/codiq")
 	build.Dir = root
 	if out, err := build.CombinedOutput(); err != nil {
 		fmt.Fprintf(os.Stderr, "integration: go build ./cmd/codiq: %v\n%s", err, out)
@@ -132,6 +157,7 @@ func TestMain(m *testing.M) {
 		os.Exit(1)
 	}
 	code := m.Run()
+	stopStack()
 	_ = os.RemoveAll(dir)
 	os.Exit(code)
 }
@@ -144,18 +170,6 @@ func TestM3Features(t *testing.T) {
 	m3Log = t
 
 	startStack(t, ctx)
-
-	dbosDSN, err := dbosConnString(connString)
-	require.NoError(t, err)
-	dbosPool, err = pgxpool.New(ctx, dbosDSN)
-	require.NoError(t, err, "open %s pool", dbosDBName)
-	t.Cleanup(dbosPool.Close)
-	// The database exists because the initdb script the stack mounts creates it.
-	// Proving that here, once, turns "M3's whole premise is missing" into one
-	// clear failure instead of a puzzling one inside a scenario.
-	var one int
-	require.NoError(t, dbosPool.QueryRow(ctx, `SELECT 1`).Scan(&one),
-		"%s is not reachable; deploy/initdb/01-dbos.sql is what creates it", dbosDBName)
 
 	suite := godog.TestSuite{
 		Name:                "m3",
@@ -763,7 +777,8 @@ func (st *m3State) startIndexer() error {
 	// exec.Command and not CommandContext: this process outlives the step that
 	// starts it on purpose, and the scenario's own After hook is what cleans it
 	// up if a later step never gets to.
-	cmd := exec.Command(m3Bin, "-dsn", connString, "-dbos-dsn", dbosDSN, st.repo)
+	cmd := exec.Command(codiqBin, "-dsn", connString, "-dbos-dsn", dbosDSN, st.repo)
+	cmd.Env = codiqEnv()
 	cmd.Stdout = &st.stdout
 	cmd.Stderr = &st.stderr
 	if err := cmd.Start(); err != nil {

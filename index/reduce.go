@@ -1,4 +1,4 @@
-// The reduce half of the map-reduce loader (SPEC.md §6, §14 M4).
+// The reduce half of the map-reduce loader (SPEC.md §6, §14 M4, M5).
 //
 // M3 loaded one file per transaction. M4 loads a whole batch in one: every
 // file's delete-and-COPY, then the link rebuild, then a single commit. §6 asks
@@ -27,19 +27,23 @@
 // file, and those are held to the commit rather than released per file, so a
 // batch of N files holds N of them at once; on the stock postgres:19beta2 image
 // (max_locks_per_transaction 128, max_connections 100) one transaction ran out
-// of shared memory at 17,409 — measured. Memory is the other ceiling and the
-// lower one, since §14 M4 keeps every file's facts in RAM until the reduce. Both
-// are what SPEC.md §14 M5 removes by spilling the facts to a shared volume and
-// checkpointing keys instead of blobs; neither is worth pre-solving here, and
-// chunking the batch instead would buy a lower ceiling at the price of running
-// the whole-graph link rebuild once per chunk.
+// of shared memory at 17,409 — measured.
+//
+// M4 had a second, lower ceiling: it kept every file's facts in RAM from the
+// map phase until the reduce. That one is gone. The batch is now a slice of
+// artifact keys, ~69 bytes each, and this function reads one artifact at a time
+// *inside* the transaction, so the resident set is one FileFacts rather than
+// all of them and the workflow's own memory is linear in the file count at a
+// few tens of bytes per file. What remains is the advisory-lock ceiling, which
+// is now the binding one and is the number above: ~17.4k files per batch on a
+// stock image, raisable with max_locks_per_transaction. Chunking the batch
+// below that would buy a lower ceiling at the price of running the whole-graph
+// link rebuild once per chunk, so it is still not worth doing.
 package index
 
 import (
 	"context"
 	"fmt"
-
-	"github.com/gaarutyunov/codiq/facts"
 )
 
 // reduce writes a batch of extracted facts and rebuilds the derived edges, in
@@ -57,8 +61,31 @@ import (
 // deadlock victim's transaction is rolled back whole, so there is nothing to
 // undo, and the whole batch is a replace, so doing it again is doing it for the
 // first time.
-func (reg *registration) reduce(ctx context.Context, batch []facts.FileFacts) (int, error) {
-	return withRetry(ctx, func() error { return reg.reduceOnce(ctx, batch) })
+//
+// From M5 the batch is a list of artifact keys and this function owns the other
+// half of Decision 16: **the artifacts are deleted if and only if the
+// transaction committed.** §14 M5's skeleton is literally
+// `if err == nil { artifact.Delete(ctx, keys...) }`, and the asymmetry is the
+// point — a failed batch keeps its artifacts, so the resume consumes them
+// without re-extracting a single file (§6: "the step re-runs deterministically
+// from its checkpoint over the already-produced artifacts — no re-extraction").
+//
+// A delete that fails does not fail the reduce, and that is deliberate rather
+// than sloppy. The transaction has committed; the batch *is* loaded, and
+// returning an error here would make the workflow report a run that wrote
+// nothing when it wrote everything. What an undeleted artifact costs is disk,
+// and it costs it only until the next index of the same tree, which overwrites
+// it — artifact.Key is a pure function of (root, path) precisely so that
+// orphans are reclaimable without the sweeper Decision 16 declines to ship. So
+// the honest state after a failed delete is "loaded, and one stale artifact",
+// which is the same state §6 already defines for a failed batch.
+func (reg *registration) reduce(ctx context.Context, keys []string) (int, error) {
+	retries, err := withRetry(ctx, func() error { return reg.reduceOnce(ctx, keys) })
+	if err != nil {
+		return retries, err
+	}
+	_ = reg.art.Delete(ctx, keys...)
+	return retries, nil
 }
 
 // reduceOnce is one attempt: one transaction, one commit.
@@ -83,7 +110,18 @@ func (reg *registration) reduce(ctx context.Context, batch []facts.FileFacts) (i
 // SPEC.md §6's atomicity is the answer to that, not §5's poison-skip. The
 // deferred Rollback is what makes "the batch failed" and "the graph is
 // untouched" the same sentence.
-func (reg *registration) reduceOnce(ctx context.Context, batch []facts.FileFacts) error {
+//
+// Each artifact is read *inside* the transaction, immediately before the file it
+// describes is written — §14 M5's `for k in keys: store.ReplaceFile(tx,
+// artifact.Read(ctx, k))`, and not an incidental ordering.
+// Reading them all up front would put the whole batch's facts back in memory
+// and undo the milestone; reading one at a time keeps the resident set at a
+// single file's worth, which is what makes the batch size a lock-table question
+// rather than a heap question (the package comment). A read failure fails the
+// batch: an artifact that is gone or unreadable means the file cannot be loaded,
+// and loading the rest of the batch without it would leave the graph missing a
+// file the run reported as loaded.
+func (reg *registration) reduceOnce(ctx context.Context, keys []string) error {
 	tx, err := reg.db.Begin(ctx)
 	if err != nil {
 		return fmt.Errorf("index: reduce: begin: %w", err)
@@ -91,7 +129,11 @@ func (reg *registration) reduceOnce(ctx context.Context, batch []facts.FileFacts
 	// Rollback on any early return; a no-op once Commit has succeeded.
 	defer func() { _ = tx.Rollback(ctx) }()
 
-	for _, ff := range batch {
+	for _, key := range keys {
+		ff, err := reg.art.Read(ctx, key)
+		if err != nil {
+			return fmt.Errorf("index: reduce: %w", err)
+		}
 		if err := reg.l.load(ctx, tx, ff); err != nil {
 			return fmt.Errorf("index: reduce: %w", err)
 		}
