@@ -15,6 +15,7 @@ import (
 	"sort"
 
 	"github.com/gaarutyunov/codiq/coord"
+	"github.com/gaarutyunov/codiq/extract/cs"
 	"github.com/gaarutyunov/codiq/extract/golang"
 	"github.com/gaarutyunov/codiq/extract/java"
 	"github.com/gaarutyunov/codiq/extract/py"
@@ -37,6 +38,7 @@ type Parser interface {
 // satisfies Parser structurally; the map literal is the compile-time check that
 // they all still do.
 var byExt = map[string]Parser{
+	cs.Ext:     cs.New(),
 	golang.Ext: golang.New(),
 	java.Ext:   java.New(),
 	py.Ext:     py.New(),
