@@ -53,9 +53,9 @@ func TestWalkSelectsOnlySupportedFiles(t *testing.T) {
 	// meaningful while its extension really is. ".ts" was that file until M6
 	// registered the TypeScript stanza, ".py" until M7 registered the Python
 	// one, ".rs" until the Rust stanza landed, ".java" until the Java one did,
-	// ".cs" until the C# one did and ".rb" until the Ruby one did, which is the
-	// tripwire working as intended — six times now, each time a deliberate edit
-	// here.
+	// ".cs" until the C# one did, ".rb" until the Ruby one did and ".php" until
+	// the PHP one did, which is the tripwire working as intended — seven times
+	// now, each time a deliberate edit here.
 	//
 	// ".hs" is the canary from here on, and it is chosen to outlast the others.
 	// Every other unsupported example below is on borrowed time: ".kt" is
@@ -63,7 +63,7 @@ func TestWalkSelectsOnlySupportedFiles(t *testing.T) {
 	// registered, so a case resting on either will need this same edit again.
 	// Haskell is on no roadmap in SPEC.md, so a ".hs" file is unsupported for a
 	// reason that is not a scheduling accident.
-	require.Equal(t, []string{".cs", ".go", ".java", ".py", ".rb", ".rs", ".ts"}, extract.Extensions(),
+	require.Equal(t, []string{".cs", ".go", ".java", ".php", ".py", ".rb", ".rs", ".ts"}, extract.Extensions(),
 		"the registry grew a language; revisit the unsupported files in these cases")
 
 	tests := []struct {
@@ -84,6 +84,7 @@ func TestWalkSelectsOnlySupportedFiles(t *testing.T) {
 				"App.java":   "class App {}\n",
 				"App.cs":     "class App { }\n",
 				"app.rb":     "class App; end\n",
+				"App.php":    "<?php\nclass App {}\n",
 				"App.hs":     "main :: IO ()\n",
 				"App.kt":     "class App\n",
 				"App.class":  "\x00\x00\x00\x00",
@@ -91,7 +92,7 @@ func TestWalkSelectsOnlySupportedFiles(t *testing.T) {
 				"noext":      "\n",
 				"go.mod.bak": goMod,
 			},
-			want: []string{"App.cs", "App.java", "app.py", "app.rb", "app.rs", "app.ts", "main.go"},
+			want: []string{"App.cs", "App.java", "App.php", "app.py", "app.rb", "app.rs", "app.ts", "main.go"},
 		},
 		{
 			name: "nested packages are walked",
