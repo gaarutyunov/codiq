@@ -49,12 +49,20 @@ func tree(t *testing.T, files map[string]string) string {
 
 func TestWalkSelectsOnlySupportedFiles(t *testing.T) {
 	// Guards the assumption every case below rests on: the walk filters on
-	// extract's registry, so a case listing a ".kt" file as unsupported is only
-	// meaningful while ".kt" really is. ".ts" was that file until M6 registered
-	// the TypeScript stanza, ".py" until M7 registered the Python one, ".rs"
-	// until the Rust stanza landed and ".java" until the Java one did, which is
-	// the tripwire working as intended.
-	require.Equal(t, []string{".go", ".java", ".py", ".rs", ".ts"}, extract.Extensions(),
+	// extract's registry, so a case listing a file as unsupported is only
+	// meaningful while its extension really is. ".ts" was that file until M6
+	// registered the TypeScript stanza, ".py" until M7 registered the Python
+	// one, ".rs" until the Rust stanza landed, ".java" until the Java one did
+	// and ".cs" until the C# one did, which is the tripwire working as intended
+	// — five times now, each time a deliberate edit here.
+	//
+	// ".hs" is the canary from here on, and it is chosen to outlast the others.
+	// Every other unsupported example below is on borrowed time: ".kt" is
+	// §14 M9+'s Kotlin task and ".class" is a build output of a language already
+	// registered, so a case resting on either will need this same edit again.
+	// Haskell is on no roadmap in SPEC.md, so a ".hs" file is unsupported for a
+	// reason that is not a scheduling accident.
+	require.Equal(t, []string{".cs", ".go", ".java", ".py", ".rs", ".ts"}, extract.Extensions(),
 		"the registry grew a language; revisit the unsupported files in these cases")
 
 	tests := []struct {
@@ -73,13 +81,15 @@ func TestWalkSelectsOnlySupportedFiles(t *testing.T) {
 				"app.py":     "x = 1\n",
 				"app.rs":     "fn main() {}\n",
 				"App.java":   "class App {}\n",
+				"App.cs":     "class App { }\n",
+				"App.hs":     "main :: IO ()\n",
 				"App.kt":     "class App\n",
 				"App.class":  "\x00\x00\x00\x00",
 				"Makefile":   "all:\n",
 				"noext":      "\n",
 				"go.mod.bak": goMod,
 			},
-			want: []string{"App.java", "app.py", "app.rs", "app.ts", "main.go"},
+			want: []string{"App.cs", "App.java", "app.py", "app.rs", "app.ts", "main.go"},
 		},
 		{
 			name: "nested packages are walked",
