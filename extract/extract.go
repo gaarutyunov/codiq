@@ -16,6 +16,7 @@ import (
 
 	"github.com/gaarutyunov/codiq/coord"
 	"github.com/gaarutyunov/codiq/extract/golang"
+	"github.com/gaarutyunov/codiq/extract/py"
 	"github.com/gaarutyunov/codiq/extract/ts"
 	"github.com/gaarutyunov/codiq/facts"
 )
@@ -35,6 +36,7 @@ type Parser interface {
 // they all still do.
 var byExt = map[string]Parser{
 	golang.Ext: golang.New(),
+	py.Ext:     py.New(),
 	ts.Ext:     ts.New(),
 }
 

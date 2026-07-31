@@ -10,6 +10,7 @@ import (
 	"github.com/gaarutyunov/codiq/coord"
 	"github.com/gaarutyunov/codiq/extract"
 	"github.com/gaarutyunov/codiq/extract/golang"
+	"github.com/gaarutyunov/codiq/extract/py"
 	"github.com/gaarutyunov/codiq/extract/ts"
 )
 
@@ -23,6 +24,12 @@ func TestParserFor(t *testing.T) {
 		{name: "a Go file in a subdirectory", path: filepath.FromSlash("/repo/pkg/a/b.go"), want: true},
 		{name: "a TypeScript file", path: filepath.FromSlash("/repo/src/main.ts"), want: true},
 		{name: "a TSX file, which needs its own grammar", path: filepath.FromSlash("/repo/src/app.tsx"), want: false},
+		{name: "a Python file", path: filepath.FromSlash("/repo/main.py"), want: true},
+		{name: "a Python file in a package", path: filepath.FromSlash("/repo/pkg/__init__.py"), want: true},
+		{name: "a stub, which the stanza can read but nothing registers", path: filepath.FromSlash("/repo/pkg/mod.pyi"), want: false},
+		{name: "a Python file", path: filepath.FromSlash("/repo/main.py"), want: true},
+		{name: "a Python package's __init__", path: filepath.FromSlash("/repo/pkg/__init__.py"), want: true},
+		{name: "a type stub, which no ecosystem owns", path: filepath.FromSlash("/repo/pkg/mod.pyi"), want: false},
 		{name: "no extension", path: filepath.FromSlash("/repo/Makefile"), want: false},
 		{name: "an unregistered extension", path: filepath.FromSlash("/repo/main.rs"), want: false},
 		{name: "the extension is case sensitive", path: filepath.FromSlash("/repo/main.GO"), want: false},
@@ -42,8 +49,12 @@ func TestParserFor(t *testing.T) {
 	}
 }
 
+// TestExtensions is a tripwire: adding a language has to be a deliberate edit
+// here, because the set of extensions the registry answers for is what the walk
+// filters on (index) and what every ecosystem has to own a coordinate for
+// (coord.Extensions). Extensions() returns them sorted.
 func TestExtensions(t *testing.T) {
-	assert.Equal(t, []string{golang.Ext, ts.Ext}, extract.Extensions())
+	assert.Equal(t, []string{golang.Ext, py.Ext, ts.Ext}, extract.Extensions())
 }
 
 // TestRegisteredParserParses is the end-to-end check on the registry: the entry
@@ -85,4 +96,37 @@ func TestGolangParserSatisfiesParserStructurally(t *testing.T) {
 func TestTSParserSatisfiesParserStructurally(t *testing.T) {
 	var p extract.Parser = ts.New()
 	assert.NotNil(t, p)
+}
+
+// TestPyParserSatisfiesParserStructurally is the third, which is where the
+// claim stops being a coincidence: three sub-packages written independently
+// satisfy Parser, none of them imports extract, and the byExt literal in
+// extract.go is the whole of the compile-time check that they do.
+func TestPyParserSatisfiesParserStructurally(t *testing.T) {
+	var p extract.Parser = py.New()
+	assert.NotNil(t, p)
+}
+
+// TestRegisteredPythonParserParses is TestRegisteredParserParses for Python:
+// the entry for ".py" is a working parser and not just a non-nil interface
+// value, and the descriptor it produces carries the Python coordinate.
+func TestRegisteredPythonParserParses(t *testing.T) {
+	p, ok := extract.ParserFor(filepath.FromSlash("/repo/greeter.py"))
+	require.True(t, ok)
+
+	c := coord.Coord{
+		Scheme: coord.PyScheme, Manager: coord.PipManager,
+		Name: "greeter", Version: "1.0.0", Root: filepath.FromSlash("/repo"),
+	}
+	ff := p.Parse(filepath.FromSlash("/repo/greeter.py"), []byte("def greet():\n    pass\n"), c)
+
+	require.Empty(t, ff.ParseError)
+	assert.Equal(t, py.Lang, ff.File.Lang)
+	assert.Equal(t, c, ff.File.Coord)
+
+	descriptors := make([]string, 0, len(ff.Occurrences))
+	for _, occ := range ff.Occurrences {
+		descriptors = append(descriptors, occ.Descriptor.String())
+	}
+	assert.Contains(t, descriptors, "scip-python pip greeter 1.0.0 greeter/greet().")
 }
