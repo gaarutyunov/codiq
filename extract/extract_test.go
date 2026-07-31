@@ -13,6 +13,7 @@ import (
 	"github.com/gaarutyunov/codiq/extract/golang"
 	"github.com/gaarutyunov/codiq/extract/java"
 	"github.com/gaarutyunov/codiq/extract/py"
+	"github.com/gaarutyunov/codiq/extract/rb"
 	"github.com/gaarutyunov/codiq/extract/rs"
 	"github.com/gaarutyunov/codiq/extract/ts"
 )
@@ -42,6 +43,10 @@ func TestParserFor(t *testing.T) {
 		{name: "a C# script, which needs its own grammar", path: filepath.FromSlash("/repo/build.csx"), want: false},
 		{name: "a Razor component, which is not C# alone", path: filepath.FromSlash("/repo/Pages/Index.razor"), want: false},
 		{name: "a project file, which is a manifest and not a source", path: filepath.FromSlash("/repo/Greeter.csproj"), want: false},
+		{name: "a Ruby file", path: filepath.FromSlash("/repo/lib/greeter/greeter.rb"), want: true},
+		{name: "a Rake task, which is Ruby but not a .rb", path: filepath.FromSlash("/repo/lib/tasks/build.rake"), want: false},
+		{name: "a gemspec, which is Ruby and is a manifest", path: filepath.FromSlash("/repo/greeter.gemspec"), want: false},
+		{name: "a Rakefile, which has no extension at all", path: filepath.FromSlash("/repo/Rakefile"), want: false},
 		{name: "no extension", path: filepath.FromSlash("/repo/Makefile"), want: false},
 		{name: "an unregistered extension", path: filepath.FromSlash("/repo/App.kt"), want: false},
 		{name: "the extension is case sensitive", path: filepath.FromSlash("/repo/main.GO"), want: false},
@@ -66,7 +71,7 @@ func TestParserFor(t *testing.T) {
 // filters on (index) and what every ecosystem has to own a coordinate for
 // (coord.Extensions). Extensions() returns them sorted.
 func TestExtensions(t *testing.T) {
-	assert.Equal(t, []string{cs.Ext, golang.Ext, java.Ext, py.Ext, rs.Ext, ts.Ext}, extract.Extensions())
+	assert.Equal(t, []string{cs.Ext, golang.Ext, java.Ext, py.Ext, rb.Ext, rs.Ext, ts.Ext}, extract.Extensions())
 }
 
 // TestRegisteredParserParses is the end-to-end check on the registry: the entry
@@ -250,4 +255,41 @@ func TestRegisteredCSharpParserParses(t *testing.T) {
 		descriptors = append(descriptors, occ.Descriptor.String())
 	}
 	assert.Contains(t, descriptors, "scip-csharp nuget Codiq.Greeter 1.0.0 greeter/Greeter#Greet().")
+}
+
+// TestRBParserSatisfiesParserStructurally is the seventh, and the claim it makes
+// is the registry's rather than any one language's: seven sub-packages written
+// independently satisfy Parser, none of them imports extract, and the byExt
+// literal in extract.go is the whole of the compile-time check that they do.
+func TestRBParserSatisfiesParserStructurally(t *testing.T) {
+	var p extract.Parser = rb.New()
+	assert.NotNil(t, p)
+}
+
+// TestRegisteredRubyParserParses is TestRegisteredParserParses for Ruby: the
+// entry for ".rb" is a working parser and not just a non-nil interface value,
+// and the descriptor it produces carries the RubyGems coordinate — with the
+// namespace read off the `module`/`class` nesting and not off `lib/greeter/`,
+// which is the one part of Ruby's namespace rule that shows up in a five-line
+// file.
+func TestRegisteredRubyParserParses(t *testing.T) {
+	path := filepath.FromSlash("/repo/lib/greeter/greeter.rb")
+	p, ok := extract.ParserFor(path)
+	require.True(t, ok)
+
+	c := coord.Coord{
+		Scheme: coord.RubyScheme, Manager: coord.GemManager,
+		Name: "greeter", Version: "1.0.0", Root: filepath.FromSlash("/repo"),
+	}
+	ff := p.Parse(path, []byte("module Greeter\n  class Greeter\n    def greet\n      \"hi\"\n    end\n  end\nend\n"), c)
+
+	require.Empty(t, ff.ParseError)
+	assert.Equal(t, rb.Lang, ff.File.Lang)
+	assert.Equal(t, c, ff.File.Coord)
+
+	descriptors := make([]string, 0, len(ff.Occurrences))
+	for _, occ := range ff.Occurrences {
+		descriptors = append(descriptors, occ.Descriptor.String())
+	}
+	assert.Contains(t, descriptors, "scip-ruby gem greeter 1.0.0 Greeter/Greeter#greet().")
 }

@@ -1,0 +1,17 @@
+PATH
+  remote: .
+  specs:
+    codiq-greeter (1.0.0)
+
+GEM
+  remote: https://rubygems.org/
+  specs:
+
+PLATFORMS
+  ruby
+
+DEPENDENCIES
+  codiq-greeter!
+
+BUNDLED WITH
+   2.5.9
