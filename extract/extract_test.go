@@ -10,6 +10,7 @@ import (
 	"github.com/gaarutyunov/codiq/coord"
 	"github.com/gaarutyunov/codiq/extract"
 	"github.com/gaarutyunov/codiq/extract/golang"
+	"github.com/gaarutyunov/codiq/extract/java"
 	"github.com/gaarutyunov/codiq/extract/py"
 	"github.com/gaarutyunov/codiq/extract/rs"
 	"github.com/gaarutyunov/codiq/extract/ts"
@@ -33,8 +34,11 @@ func TestParserFor(t *testing.T) {
 		{name: "a type stub, which no ecosystem owns", path: filepath.FromSlash("/repo/pkg/mod.pyi"), want: false},
 		{name: "a Rust crate root", path: filepath.FromSlash("/repo/src/main.rs"), want: true},
 		{name: "a Rust module in a directory", path: filepath.FromSlash("/repo/src/util/mod.rs"), want: true},
+		{name: "a Java compilation unit", path: filepath.FromSlash("/repo/src/main/java/com/example/App.java"), want: true},
+		{name: "a Java file outside a source root, which the stanza does not care about", path: filepath.FromSlash("/repo/App.java"), want: true},
+		{name: "a class file, which is a build output and not a source", path: filepath.FromSlash("/repo/App.class"), want: false},
 		{name: "no extension", path: filepath.FromSlash("/repo/Makefile"), want: false},
-		{name: "an unregistered extension", path: filepath.FromSlash("/repo/App.java"), want: false},
+		{name: "an unregistered extension", path: filepath.FromSlash("/repo/App.kt"), want: false},
 		{name: "the extension is case sensitive", path: filepath.FromSlash("/repo/main.GO"), want: false},
 		{name: "not the whole name", path: filepath.FromSlash("/repo/go"), want: false},
 	}
@@ -57,7 +61,7 @@ func TestParserFor(t *testing.T) {
 // filters on (index) and what every ecosystem has to own a coordinate for
 // (coord.Extensions). Extensions() returns them sorted.
 func TestExtensions(t *testing.T) {
-	assert.Equal(t, []string{golang.Ext, py.Ext, rs.Ext, ts.Ext}, extract.Extensions())
+	assert.Equal(t, []string{golang.Ext, java.Ext, py.Ext, rs.Ext, ts.Ext}, extract.Extensions())
 }
 
 // TestRegisteredParserParses is the end-to-end check on the registry: the entry
@@ -120,6 +124,16 @@ func TestRSParserSatisfiesParserStructurally(t *testing.T) {
 	assert.NotNil(t, p)
 }
 
+// TestJavaParserSatisfiesParserStructurally is the fifth, and by now the claim
+// is about the registry and not about any of the languages in it: five
+// sub-packages written independently satisfy Parser, none of them imports
+// extract, and the byExt literal in extract.go is the whole of the compile-time
+// check that they do.
+func TestJavaParserSatisfiesParserStructurally(t *testing.T) {
+	var p extract.Parser = java.New()
+	assert.NotNil(t, p)
+}
+
 // TestRegisteredPythonParserParses is TestRegisteredParserParses for Python:
 // the entry for ".py" is a working parser and not just a non-nil interface
 // value, and the descriptor it produces carries the Python coordinate.
@@ -168,4 +182,31 @@ func TestRegisteredRustParserParses(t *testing.T) {
 		descriptors = append(descriptors, occ.Descriptor.String())
 	}
 	assert.Contains(t, descriptors, "scip-rust cargo greeter 1.0.0 greeter/greet().")
+}
+
+// TestRegisteredJavaParserParses is TestRegisteredParserParses for Java: the
+// entry for ".java" is a working parser and not just a non-nil interface value,
+// and the descriptor it produces carries the Maven coordinate — with the
+// namespace read off the `package` clause and not off `src/main/java/`, which is
+// the one part of Java's namespace rule that shows up in a three-line file.
+func TestRegisteredJavaParserParses(t *testing.T) {
+	path := filepath.FromSlash("/repo/src/main/java/greeter/Greeter.java")
+	p, ok := extract.ParserFor(path)
+	require.True(t, ok)
+
+	c := coord.Coord{
+		Scheme: coord.JavaScheme, Manager: coord.MavenManager,
+		Name: "com.example:greeter", Version: "1.0.0", Root: filepath.FromSlash("/repo"),
+	}
+	ff := p.Parse(path, []byte("package greeter;\n\npublic class Greeter {\n    public String greet() { return \"\"; }\n}\n"), c)
+
+	require.Empty(t, ff.ParseError)
+	assert.Equal(t, java.Lang, ff.File.Lang)
+	assert.Equal(t, c, ff.File.Coord)
+
+	descriptors := make([]string, 0, len(ff.Occurrences))
+	for _, occ := range ff.Occurrences {
+		descriptors = append(descriptors, occ.Descriptor.String())
+	}
+	assert.Contains(t, descriptors, "scip-java maven com.example:greeter 1.0.0 greeter/Greeter#greet().")
 }
