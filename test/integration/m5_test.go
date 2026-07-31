@@ -223,6 +223,40 @@ func (st *m5State) sourcesDeleted() error {
 	return nil
 }
 
+// --- then: the report ------------------------------------------------------
+
+// runCounted is m4_test.go's step of the same name with one line changed, and
+// the changed line is the reason it is restated here rather than embedded:
+// cmd/codiq prints no `skipped` line at all when nothing was skipped (its
+// report returns as soon as res.Skipped is empty), and two of M5's four
+// scenarios index a corpus with no poison in it. M4's version reads the field
+// unconditionally, so on a clean run it fails on the absence of a line the
+// binary deliberately does not print.
+//
+// Nothing about the claim is relaxed. The skip count is still asserted to be
+// exactly the files the run did not load, so a run that lost a file and printed
+// no skip for it is still a failure — it is only the *reading* of the report
+// that now agrees with what the report is.
+func (st *m5State) runCounted(files, loaded int) error {
+	gotFiles, err := reportField(st.report, "files")
+	if err != nil {
+		return err
+	}
+	gotLoaded, err := reportField(st.report, "loaded")
+	if err != nil {
+		return err
+	}
+	gotSkipped, err := reportSkipped(st.report)
+	if err != nil {
+		return err
+	}
+	return check(func(t assert.TestingT) {
+		assert.Equal(t, files, gotFiles, "files the walk selected:\n%s", st.report)
+		assert.Equal(t, loaded, gotLoaded, "files loaded:\n%s", st.report)
+		assert.Equal(t, files-loaded, gotSkipped, "files skipped:\n%s", st.report)
+	})
+}
+
 // --- then: the payload that crosses a checkpoint ---------------------------
 
 // everyTaskCheckpointedAKey reads every map task's recorded output and requires
@@ -594,6 +628,23 @@ func validArtifactKey(key string) bool {
 		return false
 	}
 	return strings.Trim(digest, "0123456789abcdef") == ""
+}
+
+// reportSkipped is the report's skipped count, with an absent line read as the
+// zero it stands for.
+//
+// The line is omitted rather than printed as `skipped 0` (cmd/codiq report),
+// and the omission is the point of that line: the count exists to introduce the
+// list of paths under it, so with nothing to list there is nothing to say. Its
+// presence is matched the way m4_test.go's skippedBlock matches it, so the two
+// read the same report the same way.
+func reportSkipped(report string) (int, error) {
+	for _, line := range strings.Split(report, "\n") {
+		if strings.HasPrefix(strings.TrimSpace(line), "skipped ") {
+			return reportField(report, "skipped")
+		}
+	}
+	return 0, nil
 }
 
 // extractedPaths is the files a batch's map tasks recorded something for, for a
