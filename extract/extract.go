@@ -19,6 +19,7 @@ import (
 	"github.com/gaarutyunov/codiq/extract/golang"
 	"github.com/gaarutyunov/codiq/extract/java"
 	"github.com/gaarutyunov/codiq/extract/py"
+	"github.com/gaarutyunov/codiq/extract/rb"
 	"github.com/gaarutyunov/codiq/extract/rs"
 	"github.com/gaarutyunov/codiq/extract/ts"
 	"github.com/gaarutyunov/codiq/facts"
@@ -42,6 +43,7 @@ var byExt = map[string]Parser{
 	golang.Ext: golang.New(),
 	java.Ext:   java.New(),
 	py.Ext:     py.New(),
+	rb.Ext:     rb.New(),
 	rs.Ext:     rs.New(),
 	ts.Ext:     ts.New(),
 }
