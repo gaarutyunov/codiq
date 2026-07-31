@@ -6,11 +6,14 @@
 // deploy/seed/seed.sql. Nothing is faked and there is no skip path: if Docker is
 // not there, the suite fails rather than passing vacuously.
 //
-// The stack is stood up once for the whole suite and shared by every scenario.
-// It is read-only in every scenario but the seed, and the seed is idempotent by
-// construction (deploy/seed/seed.sql deletes its own files' rows before
-// rewriting them), so scenarios do not need a per-scenario database reset —
-// which is what keeps the suite's cost the cost of one gopgql build.
+// The stack is stood up once for the whole *package* — not once per milestone —
+// and shared by every scenario in every suite; see startStack for why that
+// changed at M5 and what makes it safe.
+//
+// M1's own scenarios are read-only but for the seed, and the seed is idempotent
+// by construction (deploy/seed/seed.sql deletes its own files' rows before
+// rewriting them), so they do not need a per-scenario database reset; every
+// later suite opens with a Background that truncates.
 package integration
 
 import (
@@ -21,6 +24,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"sync"
 	"testing"
 	"time"
 
@@ -58,6 +62,15 @@ const (
 	// `go install` over the network.
 	gopgqlImage = "codiq-test/gopgql:m1"
 
+	// artifactDirEnv is cmd/codiq's name for the shared volume the map phase
+	// spills fact artifacts to (cmd/codiq's artifactDirEnv, SPEC.md §10, §11.1).
+	// It is named here because SPEC.md §13 requires the tests to point it at a
+	// temp directory: left unset, every codiq process the suite runs would fall
+	// through to the binary's default, $TMPDIR/codiq-artifacts, and the
+	// scenarios that kill a run and never resume it would leave their artifacts
+	// there for good.
+	artifactDirEnv = "CODIQ_ARTIFACT_DIR"
+
 	// gopgql conform's exit statuses (gopgql cmd/gopgql/main.go): 0 conforms,
 	// 1 could not run, 2 drifted. The split is the reason the check is worth
 	// running — "no" and "no answer" need different fixes.
@@ -77,7 +90,44 @@ var (
 	// nwName is the Docker network postgres and the gopgql containers share, so
 	// a scenario that needs a one-shot gopgql run can join it.
 	nwName string
+
+	// stackOnce and stackDown are the stack's lifetime. It is brought up by
+	// whichever suite runs first and taken down by TestMain (m3_test.go) after
+	// the last one, rather than by a t.Cleanup belonging to one milestone's
+	// *testing.T — which is the whole of what makes it shared.
+	stackOnce sync.Once
+	stackDown []func()
+
+	// artifactDir is $CODIQ_ARTIFACT_DIR for every codiq process the suite runs
+	// (SPEC.md §13). One directory for the package by default, replaced by a
+	// scenario that wants to count what is on it (m5_test.go).
+	artifactDir string
 )
+
+// onStackDown registers a teardown step, run in reverse by stopStack.
+func onStackDown(f func()) { stackDown = append(stackDown, f) }
+
+// stopStack runs the teardown steps in reverse, the order t.Cleanup would have.
+func stopStack() {
+	for i := len(stackDown) - 1; i >= 0; i-- {
+		stackDown[i]()
+	}
+	stackDown = nil
+}
+
+// codiqEnv is the environment every codiq process the suite runs gets: this
+// process's, plus the artifact directory.
+//
+// A directory of the suite's own is not a nicety. SPEC.md §13 asks for one
+// ("from M5, artifacts use a temp dir in tests"), and without it the scenarios
+// that kill a run before its reduce commits — which is most of M3's and M4's,
+// and two of M5's — accumulate artifacts in $TMPDIR/codiq-artifacts, where
+// nothing will ever collect them: Decision 16 ships no sweeper, and the keys
+// they were written under are a function of a temp module that no longer
+// exists, so no later run can reclaim them either.
+func codiqEnv() []string {
+	return append(os.Environ(), artifactDirEnv+"="+artifactDir)
+}
 
 // TestFeatures is the godog entry point under `go test` (SPEC.md §13).
 func TestFeatures(t *testing.T) {
@@ -101,17 +151,59 @@ func TestFeatures(t *testing.T) {
 	}
 }
 
-// startStack brings up the M1 composition: a network, postgres, the gopgql
-// image built from deploy/gopgql.Dockerfile, a one-shot `gopgql migrate`, and
-// `gopgql-mcp` over HTTP. It mirrors deploy/docker-compose.yml service for
-// service; the seed is left to a scenario step, because seeding is behaviour
-// the feature file talks about rather than infrastructure.
+// startStack brings the composition up on the first call and does nothing on
+// every later one.
+//
+// **Up to M4 each milestone stood up a stack of its own, and that is what
+// changed here.** The reason each had one was that several suites assert over
+// the whole graph, so another suite's corpus must not be in the database — but
+// every suite after M1 already opens with a Background that truncates
+// (m2_test.go's emptyGraph, m3_test.go's emptyGraphAndCheckpoints), because it
+// needs the same isolation from the *scenario* before it. Standing up a second,
+// third and fourth postgres bought nothing the Background was not already
+// buying, and it was not free: measured on a four-core host, the three extra
+// stacks were about two minutes of the package's five, spent starting and
+// tearing down containers while the machine also had to run the indexer and the
+// database it is indexing into.
+//
+// That matters beyond wall time. The suite's one real failure mode is a
+// 152-file index whose reduce transaction does not finish inside indexWait
+// (m3_test.go), and what pushes it there is the host running out of CPU rather
+// than anything in the product; the fewer container lifecycles the package
+// spends, the further that failure is from the edge. So: one network, one
+// postgres, one image build, one migration, one gopgql-mcp, one cmd/codiq
+// binary, for every scenario in the package.
+//
+// What keeps it honest is that nothing about a suite's isolation is now
+// implicit. M1 runs first and against an empty database, as it always did;
+// every suite after it truncates the graph, and from M3 the checkpoints, before
+// each of its own scenarios. A suite run alone — `go test -run TestM4Features`
+// — brings the stack up itself, so no suite depends on another having run.
+//
+// It mirrors deploy/docker-compose.yml service for service; the seed is left to
+// a scenario step, because seeding is behaviour the feature file talks about
+// rather than infrastructure.
 func startStack(t *testing.T, ctx context.Context) {
+	t.Helper()
+	stackOnce.Do(func() { bringUpStack(t, ctx) })
+	// The Once has run, but it may have run inside a *different* test that then
+	// failed; saying so here beats a nil-pool panic three scenarios later.
+	require.NotNil(t, pool, "the stack did not come up")
+}
+
+// bringUpStack does the work: a network, postgres, the gopgql image built from
+// deploy/gopgql.Dockerfile, a one-shot `gopgql migrate`, `gopgql-mcp` over HTTP,
+// the two pools, the artifact directory and the cmd/codiq binary.
+//
+// Teardown is registered with onStackDown rather than t.Cleanup: the caller's
+// *testing.T belongs to one milestone and would take the stack down when that
+// milestone ended, which is the thing this function exists not to do.
+func bringUpStack(t *testing.T, ctx context.Context) {
 	t.Helper()
 
 	nw, err := network.New(ctx)
 	require.NoError(t, err, "create docker network")
-	t.Cleanup(func() { _ = nw.Remove(context.Background()) })
+	onStackDown(func() { _ = nw.Remove(context.Background()) })
 	nwName = nw.Name
 
 	// postgres:19beta2, pinned exactly: SQL/PGQ is a PostgreSQL 19 feature and
@@ -130,7 +222,7 @@ func startStack(t *testing.T, ctx context.Context) {
 		),
 	)
 	require.NoError(t, err, "start postgres:19beta2")
-	t.Cleanup(func() { _ = pgc.Terminate(context.Background()) })
+	onStackDown(func() { _ = pgc.Terminate(context.Background()) })
 
 	dsn = fmt.Sprintf("postgres://%s:%s@%s:5432/%s?sslmode=disable", dbUser, dbPass, pgAlias, dbName)
 	connString, err = pgc.ConnectionString(ctx, "sslmode=disable")
@@ -138,7 +230,7 @@ func startStack(t *testing.T, ctx context.Context) {
 
 	pool, err = pgxpool.New(ctx, connString)
 	require.NoError(t, err, "open pool")
-	t.Cleanup(pool.Close)
+	onStackDown(pool.Close)
 
 	// The schema, applied by the real gopgql from the committed migrations —
 	// the same `gopgql migrate --dir` the compose runs, with no --sdl, so the
@@ -167,7 +259,7 @@ func startStack(t *testing.T, ctx context.Context) {
 		Started: true,
 	})
 	require.NoError(t, err, "run gopgql migrate")
-	t.Cleanup(func() { _ = migrate.Terminate(context.Background()) })
+	onStackDown(func() { _ = migrate.Terminate(context.Background()) })
 	t.Logf("gopgql image built and migrations applied in %s", time.Since(buildStart).Round(time.Millisecond))
 
 	requireExitZero(t, ctx, migrate, "gopgql migrate")
@@ -194,11 +286,33 @@ func startStack(t *testing.T, ctx context.Context) {
 		Started: true,
 	})
 	require.NoError(t, err, "start gopgql-mcp")
-	t.Cleanup(func() { _ = mcpC.Terminate(context.Background()) })
+	onStackDown(func() { _ = mcpC.Terminate(context.Background()) })
 
 	endpoint, err := mcpC.PortEndpoint(ctx, "8080/tcp", "http")
 	require.NoError(t, err, "gopgql-mcp endpoint")
 	mcpURL = endpoint + "/mcp"
+
+	// The DBOS system database, on the same instance by design (SPEC.md §9's
+	// "Isolation") and created by the initdb script the stack mounts. Opened
+	// here rather than by the first suite that reads a checkpoint, so that the
+	// suites that read one do not each open a pool of their own against a
+	// database they now share.
+	dbosDSN, err := dbosConnString(connString)
+	require.NoError(t, err)
+	dbosPool, err = pgxpool.New(ctx, dbosDSN)
+	require.NoError(t, err, "open %s pool", dbosDBName)
+	onStackDown(dbosPool.Close)
+	var one int
+	require.NoError(t, dbosPool.QueryRow(ctx, `SELECT 1`).Scan(&one),
+		"%s is not reachable; deploy/initdb/01-dbos.sql is what creates it", dbosDBName)
+
+	// The shared volume, as a directory of this process's own (SPEC.md §13).
+	// Not t.TempDir(): that belongs to whichever milestone happened to bring the
+	// stack up and would be removed when it ended, taking the artifacts of every
+	// later suite's failed batch with it.
+	artifactDir, err = os.MkdirTemp("", "codiq-artifacts-*")
+	require.NoError(t, err, "artifact directory")
+	onStackDown(func() { _ = os.RemoveAll(artifactDir) })
 }
 
 // scenarioState carries the MCP session and the last answer between the steps

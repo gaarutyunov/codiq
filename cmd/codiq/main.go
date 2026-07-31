@@ -1,4 +1,5 @@
-// Command codiq indexes a repository into the CodiQ graph (SPEC.md §14 M2, M3).
+// Command codiq indexes a repository into the CodiQ graph (SPEC.md §14 M2, M3,
+// M5).
 //
 // It is a one-shot program: it walks the tree, parses every file it has a
 // parser for, replaces that file's rows, rebuilds the cross-file edges, and
@@ -15,12 +16,17 @@
 // purpose, which leave the workflow in different states and are picked up again
 // by different calls (see durable and start).
 //
-//	codiq [-dsn URL] [-dbos-dsn URL] [-v] [repo]
+// Since M5 the map phase spills each file's facts to a shared volume as a
+// protobuf artifact and checkpoints only the key (SPEC.md §5, §10), so this
+// file is also responsible for the third resource a run needs: the artifact
+// directory.
+//
+//	codiq [-dsn URL] [-dbos-dsn URL] [-artifact-dir DIR] [-v] [repo]
 //
 // Wiring lives here and only here (SPEC.md §12: plain Go, packages grouped by
 // what they do, wired in main). The flag package is the whole CLI surface — one
-// command with two flags does not need a command framework, and the spec names
-// none.
+// command with a handful of flags does not need a command framework, and the
+// spec names none.
 package main
 
 import (
@@ -39,6 +45,7 @@ import (
 	"github.com/dbos-inc/dbos-transact-golang/dbos"
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"github.com/gaarutyunov/codiq/artifact"
 	"github.com/gaarutyunov/codiq/index"
 )
 
@@ -54,6 +61,27 @@ const dsnEnv = "CODIQ_DATABASE_URL"
 // every step of a run never contends with the bulk writes that run is making
 // into the graph tables. Nothing but DBOS ever opens it.
 const dbosDSNEnv = "DBOS_DATABASE_URL"
+
+// artifactDirEnv is the shared volume the map phase spills facts to (SPEC.md
+// §5, §10, §11.1, §14 M5). deploy/docker-compose.yml mounts the `artifacts`
+// volume there.
+const artifactDirEnv = "CODIQ_ARTIFACT_DIR"
+
+// defaultArtifactDir is where artifacts go when nothing says otherwise.
+//
+// Unlike the two connection strings this program refuses to start without, an
+// artifact directory has a correct default: it is scratch space, and every
+// machine has somewhere to put scratch. Refusing to run for want of one would
+// break `codiq /repo` for every caller outside Compose, which is a worse failure
+// than picking a directory.
+//
+// What it must not be is a fresh one. The whole point of the artifacts is that a
+// process which dies after the map phase leaves them for its successor to
+// consume (§6, §14 M5), so a MkdirTemp per process would turn every resume into
+// a re-extraction — the exact behaviour the milestone removes. A fixed name
+// under the system temp directory is stable across processes on one machine,
+// which is the same scope §10's local volume has.
+var defaultArtifactDir = filepath.Join(os.TempDir(), "codiq-artifacts")
 
 // shutdownTimeout is how long Shutdown is given to wind the workflow down before
 // the process stops waiting for it.
@@ -90,6 +118,7 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) error {
 	fs.SetOutput(stderr)
 	dsn := fs.String("dsn", "", "PostgreSQL connection string (default $"+dsnEnv+")")
 	dbosDSN := fs.String("dbos-dsn", "", "DBOS checkpoint connection string (default $"+dbosDSNEnv+")")
+	artifactDir := fs.String("artifact-dir", "", "directory for map-phase fact artifacts (default $"+artifactDirEnv+", else "+defaultArtifactDir+")")
 	verbose := fs.Bool("v", false, "print the reason behind every skipped file")
 	fs.Usage = func() {
 		_, _ = fmt.Fprintf(stderr, "usage: codiq [flags] [repo]\n\n"+
@@ -122,6 +151,12 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) error {
 	if *dbosDSN == "" {
 		return fmt.Errorf("no checkpoint database: pass -dbos-dsn or set %s", dbosDSNEnv)
 	}
+	if *artifactDir == "" {
+		*artifactDir = os.Getenv(artifactDirEnv)
+	}
+	if *artifactDir == "" {
+		*artifactDir = defaultArtifactDir
+	}
 
 	// The workflow's input is the absolute path, not what was typed. It is what
 	// identifies the run in the checkpoint tables, so `codiq .` and `codiq /repo`
@@ -139,6 +174,14 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) error {
 	}
 	defer pool.Close()
 
+	// Opened before DBOS is launched, so a volume that is missing or not
+	// writable is an error at startup rather than one every map task discovers
+	// for itself once the queue is already draining.
+	art, err := artifact.Open(*artifactDir)
+	if err != nil {
+		return err
+	}
+
 	dctx, err := durable(ctx, *dbosDSN, stderr)
 	if err != nil {
 		return err
@@ -146,7 +189,7 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) error {
 	// Registration and launch are separate for one reason: Launch recovers this
 	// executor's unfinished workflows and starts the "extract" queue's workers,
 	// so everything they need has to already be registered when it runs.
-	if err := index.Register(dctx, pool); err != nil {
+	if err := index.Register(dctx, pool, art); err != nil {
 		return err
 	}
 	if err := dbos.Launch(dctx); err != nil {
