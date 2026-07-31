@@ -39,11 +39,30 @@
 // stock image, raisable with max_locks_per_transaction. Chunking the batch
 // below that would buy a lower ceiling at the price of running the whole-graph
 // link rebuild once per chunk, so it is still not worth doing.
+//
+// M8 changes the link half of the sequence and nothing else about it. Where the
+// reduce used to end in link.RebuildAll -- delete every derived table, recompute
+// the whole corpus -- it now accumulates the batch's neighbourhood as it loads
+// (link.Batch) and re-links only that. The full rebuild stays, as SPEC.md §7's
+// scheduled and on-demand backstop (schedule.go) and as the incremental path's
+// own fallback for `implements`, which cannot be scoped to a neighbourhood at
+// all (link.Batch.Relink).
+//
+// What that is worth depends entirely on how much of the corpus a batch is, and
+// it is worth being blunt about: `codiq <repo>` walks the whole tree and reduces
+// every file it finds, and store.flatten mints fresh occurrence uuids on every
+// load, so on a whole-tree run *every* file is a changed file and the
+// neighbourhood is the whole corpus. The incremental path then does what the
+// rebuild did, plus two indexed queries per file. The saving is real but it
+// belongs to a batch that is a *subset* of the corpus -- which the mechanism now
+// supports and the walk does not yet produce.
 package index
 
 import (
 	"context"
 	"fmt"
+
+	"github.com/gaarutyunov/codiq/link"
 )
 
 // reduce writes a batch of extracted facts and rebuilds the derived edges, in
@@ -129,16 +148,39 @@ func (reg *registration) reduceOnce(ctx context.Context, keys []string) error {
 	// Rollback on any early return; a no-op once Commit has succeeded.
 	defer func() { _ = tx.Rollback(ctx) }()
 
+	// The batch's neighbourhood, accumulated as its files are loaded and
+	// re-linked once at the end (SPEC.md §7: "runs as a reduce step, once per
+	// batch over the union of affected neighborhoods"). Opened before the first
+	// artifact is read, because it takes the link lock that keeps the scheduled
+	// backstop off a batch in flight, and a lock taken after the first write is
+	// a lock taken too late.
+	batch, err := link.NewBatch(ctx, tx)
+	if err != nil {
+		return fmt.Errorf("index: reduce: %w", err)
+	}
+
 	for _, key := range keys {
 		ff, err := reg.art.Read(ctx, key)
 		if err != nil {
 			return fmt.Errorf("index: reduce: %w", err)
 		}
+		// Before *and* after, and the load between them is what makes the
+		// first call unrepeatable: it is the only chance to see which files
+		// referenced what this one used to define. link.Batch.Touch has the
+		// argument for why that matters -- an inbound `imports` edge is the one
+		// derived row store.deleteFile does not clear -- and a test that runs
+		// the version without it and requires a wrong answer.
+		if err := batch.Touch(ctx, ff.File.Path); err != nil {
+			return fmt.Errorf("index: reduce: %w", err)
+		}
 		if err := reg.l.load(ctx, tx, ff); err != nil {
 			return fmt.Errorf("index: reduce: %w", err)
 		}
+		if err := batch.Touch(ctx, ff.File.Path); err != nil {
+			return fmt.Errorf("index: reduce: %w", err)
+		}
 	}
-	if err := reg.l.relink(ctx, tx); err != nil {
+	if err := batch.Relink(ctx); err != nil {
 		return fmt.Errorf("index: reduce: %w", err)
 	}
 
