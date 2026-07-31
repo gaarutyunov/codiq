@@ -1,0 +1,14 @@
+{
+    "name": "codiq/greeter",
+    "description": "Greeter greets by name.",
+    "version": "1.0.0",
+    "type": "library",
+    "require": {
+        "php": ">=8.1"
+    },
+    "autoload": {
+        "psr-4": {
+            "Com\\Example\\": "src/"
+        }
+    }
+}

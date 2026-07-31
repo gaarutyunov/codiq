@@ -12,6 +12,7 @@ import (
 	"github.com/gaarutyunov/codiq/extract/cs"
 	"github.com/gaarutyunov/codiq/extract/golang"
 	"github.com/gaarutyunov/codiq/extract/java"
+	"github.com/gaarutyunov/codiq/extract/php"
 	"github.com/gaarutyunov/codiq/extract/py"
 	"github.com/gaarutyunov/codiq/extract/rb"
 	"github.com/gaarutyunov/codiq/extract/rs"
@@ -47,6 +48,10 @@ func TestParserFor(t *testing.T) {
 		{name: "a Rake task, which is Ruby but not a .rb", path: filepath.FromSlash("/repo/lib/tasks/build.rake"), want: false},
 		{name: "a gemspec, which is Ruby and is a manifest", path: filepath.FromSlash("/repo/greeter.gemspec"), want: false},
 		{name: "a Rakefile, which has no extension at all", path: filepath.FromSlash("/repo/Rakefile"), want: false},
+		{name: "a PHP compilation unit", path: filepath.FromSlash("/repo/src/Greeter/Greeter.php"), want: true},
+		{name: "a PHP template, which is mostly HTML and needs its own grammar", path: filepath.FromSlash("/repo/views/index.phtml"), want: false},
+		{name: "a legacy PHP extension no ecosystem owns", path: filepath.FromSlash("/repo/legacy/util.php5"), want: false},
+		{name: "a Composer manifest, which is a manifest and not a source", path: filepath.FromSlash("/repo/composer.json"), want: false},
 		{name: "no extension", path: filepath.FromSlash("/repo/Makefile"), want: false},
 		{name: "an unregistered extension", path: filepath.FromSlash("/repo/App.kt"), want: false},
 		{name: "the extension is case sensitive", path: filepath.FromSlash("/repo/main.GO"), want: false},
@@ -71,7 +76,7 @@ func TestParserFor(t *testing.T) {
 // filters on (index) and what every ecosystem has to own a coordinate for
 // (coord.Extensions). Extensions() returns them sorted.
 func TestExtensions(t *testing.T) {
-	assert.Equal(t, []string{cs.Ext, golang.Ext, java.Ext, py.Ext, rb.Ext, rs.Ext, ts.Ext}, extract.Extensions())
+	assert.Equal(t, []string{cs.Ext, golang.Ext, java.Ext, php.Ext, py.Ext, rb.Ext, rs.Ext, ts.Ext}, extract.Extensions())
 }
 
 // TestRegisteredParserParses is the end-to-end check on the registry: the entry
@@ -292,4 +297,41 @@ func TestRegisteredRubyParserParses(t *testing.T) {
 		descriptors = append(descriptors, occ.Descriptor.String())
 	}
 	assert.Contains(t, descriptors, "scip-ruby gem greeter 1.0.0 Greeter/Greeter#greet().")
+}
+
+// TestPHPParserSatisfiesParserStructurally is the eighth, and the claim it makes
+// is the registry's rather than any one language's: eight sub-packages written
+// independently satisfy Parser, none of them imports extract, and the byExt
+// literal in extract.go is the whole of the compile-time check that they do.
+func TestPHPParserSatisfiesParserStructurally(t *testing.T) {
+	var p extract.Parser = php.New()
+	assert.NotNil(t, p)
+}
+
+// TestRegisteredPHPParserParses is TestRegisteredParserParses for PHP: the entry
+// for ".php" is a working parser and not just a non-nil interface value, and the
+// descriptor it produces carries the Composer coordinate — with the namespace
+// read off the `namespace` statement and not off `src/Greeter/`, which is the one
+// part of PHP's namespace rule that shows up in a six-line file.
+func TestRegisteredPHPParserParses(t *testing.T) {
+	path := filepath.FromSlash("/repo/src/Greeter/Greeter.php")
+	p, ok := extract.ParserFor(path)
+	require.True(t, ok)
+
+	c := coord.Coord{
+		Scheme: coord.PHPScheme, Manager: coord.ComposerManager,
+		Name: "codiq/greeter", Version: "1.0.0", Root: filepath.FromSlash("/repo"),
+	}
+	src := "<?php\n\nnamespace greeter;\n\nclass Greeter\n{\n    public function greet(): string\n    {\n        return \"\";\n    }\n}\n"
+	ff := p.Parse(path, []byte(src), c)
+
+	require.Empty(t, ff.ParseError)
+	assert.Equal(t, php.Lang, ff.File.Lang)
+	assert.Equal(t, c, ff.File.Coord)
+
+	descriptors := make([]string, 0, len(ff.Occurrences))
+	for _, occ := range ff.Occurrences {
+		descriptors = append(descriptors, occ.Descriptor.String())
+	}
+	assert.Contains(t, descriptors, "scip-php composer codiq/greeter 1.0.0 greeter/Greeter#greet().")
 }
