@@ -49,12 +49,12 @@ func tree(t *testing.T, files map[string]string) string {
 
 func TestWalkSelectsOnlySupportedFiles(t *testing.T) {
 	// Guards the assumption every case below rests on: the walk filters on
-	// extract's registry, so a case listing a ".java" file as unsupported is
-	// only meaningful while ".java" really is. ".ts" was that file until M6
-	// registered the TypeScript stanza, ".py" until M7 registered the Python
-	// one and ".rs" until the Rust stanza landed, which is the tripwire working
-	// as intended.
-	require.Equal(t, []string{".go", ".py", ".rs", ".ts"}, extract.Extensions(),
+	// extract's registry, so a case listing a ".kt" file as unsupported is only
+	// meaningful while ".kt" really is. ".ts" was that file until M6 registered
+	// the TypeScript stanza, ".py" until M7 registered the Python one, ".rs"
+	// until the Rust stanza landed and ".java" until the Java one did, which is
+	// the tripwire working as intended.
+	require.Equal(t, []string{".go", ".java", ".py", ".rs", ".ts"}, extract.Extensions(),
 		"the registry grew a language; revisit the unsupported files in these cases")
 
 	tests := []struct {
@@ -73,11 +73,13 @@ func TestWalkSelectsOnlySupportedFiles(t *testing.T) {
 				"app.py":     "x = 1\n",
 				"app.rs":     "fn main() {}\n",
 				"App.java":   "class App {}\n",
+				"App.kt":     "class App\n",
+				"App.class":  "\x00\x00\x00\x00",
 				"Makefile":   "all:\n",
 				"noext":      "\n",
 				"go.mod.bak": goMod,
 			},
-			want: []string{"app.py", "app.rs", "app.ts", "main.go"},
+			want: []string{"App.java", "app.py", "app.rs", "app.ts", "main.go"},
 		},
 		{
 			name: "nested packages are walked",
