@@ -118,6 +118,16 @@ func (q *Queries) DeleteAllTypeDefines(ctx context.Context) error {
 	return err
 }
 
+const deleteCallsByOwners = `-- name: DeleteCallsByOwners :exec
+DELETE FROM calls
+WHERE source_id IN (SELECT o.id FROM occurrence o WHERE o.file_id = ANY($1::uuid[]))
+`
+
+func (q *Queries) DeleteCallsByOwners(ctx context.Context, ownerFileIds []uuid.UUID) error {
+	_, err := q.db.Exec(ctx, deleteCallsByOwners, ownerFileIds)
+	return err
+}
+
 const deleteCallsBySourceFile = `-- name: DeleteCallsBySourceFile :exec
 DELETE FROM calls
 WHERE source_id IN (SELECT o.id FROM occurrence o WHERE o.file_id = $1)
@@ -231,6 +241,15 @@ func (q *Queries) DeleteImportsByFile(ctx context.Context, ownerFileID uuid.UUID
 	return err
 }
 
+const deleteImportsByOwners = `-- name: DeleteImportsByOwners :exec
+DELETE FROM imports WHERE source_id = ANY($1::uuid[])
+`
+
+func (q *Queries) DeleteImportsByOwners(ctx context.Context, ownerFileIds []uuid.UUID) error {
+	_, err := q.db.Exec(ctx, deleteImportsByOwners, ownerFileIds)
+	return err
+}
+
 const deleteOccurrencesByFile = `-- name: DeleteOccurrencesByFile :exec
 DELETE FROM occurrence WHERE file_id = $1
 `
@@ -260,6 +279,16 @@ func (q *Queries) DeleteReferencesLocalByTargetFile(ctx context.Context, ownerFi
 	return err
 }
 
+const deleteResolvesToByOwners = `-- name: DeleteResolvesToByOwners :exec
+DELETE FROM resolves_to
+WHERE source_id IN (SELECT o.id FROM occurrence o WHERE o.file_id = ANY($1::uuid[]))
+`
+
+func (q *Queries) DeleteResolvesToByOwners(ctx context.Context, ownerFileIds []uuid.UUID) error {
+	_, err := q.db.Exec(ctx, deleteResolvesToByOwners, ownerFileIds)
+	return err
+}
+
 const deleteResolvesToBySourceFile = `-- name: DeleteResolvesToBySourceFile :exec
 DELETE FROM resolves_to
 WHERE source_id IN (SELECT o.id FROM occurrence o WHERE o.file_id = $1)
@@ -286,6 +315,16 @@ DELETE FROM scope WHERE file_id = $1
 
 func (q *Queries) DeleteScopesByFile(ctx context.Context, ownerFileID uuid.UUID) error {
 	_, err := q.db.Exec(ctx, deleteScopesByFile, ownerFileID)
+	return err
+}
+
+const deleteTypeDefinesByOwners = `-- name: DeleteTypeDefinesByOwners :exec
+DELETE FROM type_defines
+WHERE source_id IN (SELECT o.id FROM occurrence o WHERE o.file_id = ANY($1::uuid[]))
+`
+
+func (q *Queries) DeleteTypeDefinesByOwners(ctx context.Context, ownerFileIds []uuid.UUID) error {
+	_, err := q.db.Exec(ctx, deleteTypeDefinesByOwners, ownerFileIds)
 	return err
 }
 
@@ -349,6 +388,24 @@ func (q *Queries) InsertFile(ctx context.Context, arg InsertFileParams) (uuid.UU
 	return id, err
 }
 
+const lockAllImplements = `-- name: LockAllImplements :exec
+SELECT e.source_id FROM implements e
+ORDER BY e.source_id, e.target_id
+FOR UPDATE OF e
+`
+
+// `implements` is re-linked in full rather than by owner (link.Batch.Relink says
+// why), so its ordered lock is over the whole table rather than over a file's
+// rows. It is needed for the same reason the per-file locks are: two batches
+// re-linking concurrently reach this table in the same position of the same
+// fixed table order, so they must also agree on the order they take its rows in.
+// RebuildAll needs no such lock, because it holds the link lock exclusively and
+// so is not racing anything.
+func (q *Queries) LockAllImplements(ctx context.Context) error {
+	_, err := q.db.Exec(ctx, lockAllImplements)
+	return err
+}
+
 const lockCallsByFile = `-- name: LockCallsByFile :exec
 WITH victim AS (
     SELECT source_id, target_id FROM calls
@@ -365,6 +422,18 @@ FOR UPDATE OF e
 
 func (q *Queries) LockCallsByFile(ctx context.Context, ownerFileID uuid.UUID) error {
 	_, err := q.db.Exec(ctx, lockCallsByFile, ownerFileID)
+	return err
+}
+
+const lockCallsByOwners = `-- name: LockCallsByOwners :exec
+SELECT e.source_id FROM calls e
+WHERE e.source_id IN (SELECT o.id FROM occurrence o WHERE o.file_id = ANY($1::uuid[]))
+ORDER BY e.source_id, e.target_id
+FOR UPDATE OF e
+`
+
+func (q *Queries) LockCallsByOwners(ctx context.Context, ownerFileIds []uuid.UUID) error {
+	_, err := q.db.Exec(ctx, lockCallsByOwners, ownerFileIds)
 	return err
 }
 
@@ -418,6 +487,76 @@ FOR UPDATE OF e
 
 func (q *Queries) LockImplementsByFile(ctx context.Context, ownerFileID uuid.UUID) error {
 	_, err := q.db.Exec(ctx, lockImplementsByFile, ownerFileID)
+	return err
+}
+
+const lockImportsByOwners = `-- name: LockImportsByOwners :exec
+SELECT e.source_id FROM imports e
+WHERE e.source_id = ANY($1::uuid[])
+ORDER BY e.source_id, e.target_id
+FOR UPDATE OF e
+`
+
+func (q *Queries) LockImportsByOwners(ctx context.Context, ownerFileIds []uuid.UUID) error {
+	_, err := q.db.Exec(ctx, lockImportsByOwners, ownerFileIds)
+	return err
+}
+
+const lockLinkExclusive = `-- name: LockLinkExclusive :exec
+SELECT pg_advisory_xact_lock(hashtextextended('codiq:link', 0))
+`
+
+func (q *Queries) LockLinkExclusive(ctx context.Context) error {
+	_, err := q.db.Exec(ctx, lockLinkExclusive)
+	return err
+}
+
+const lockLinkShared = `-- name: LockLinkShared :exec
+
+SELECT pg_advisory_xact_lock_shared(hashtextextended('codiq:link', 0))
+`
+
+// ===========================================================================
+// Link serialization (SPEC.md §7's backstop, Decision 17)
+//
+// The backstop is a *full* re-link: it empties every derived table and rebuilds
+// it from base facts. Run on a nightly timer, that collides with the one thing
+// the graph does concurrently -- an index in flight. The endpoint FKs are plain
+// REFERENCES, so a rebuild inserting `resolves_to (source_id, target_id)` while
+// a loader deletes the occurrences those ids name fails with SQLSTATE 23503
+// (`resolves_to_target_id_fkey`), and the two orderings fail differently: the
+// rebuild can also delete a file's inbound edges out from under a loader that is
+// about to re-create them. Neither is a corruption -- both transactions are
+// atomic -- but both turn a scheduled self-heal into a scheduled failure.
+//
+// So the two are given a reader/writer lock, and the asymmetry is the point.
+// Every *writer* of the base facts takes the lock in **shared** mode, so two
+// loaders still run in parallel exactly as they did before; the *full rebuild*
+// takes it **exclusive**, so it waits for every load in flight and holds off
+// every load that starts while it runs. It is an advisory lock rather than a
+// table lock because what has to be excluded is a pair of *transactions*, not a
+// pair of statements, and because a real lock strong enough to do it would also
+// block the gopgql MCP readers (§8) -- which is the same reason the rebuild
+// DELETEs instead of TRUNCATEs.
+//
+// Held to the end of the transaction (`_xact_`), so nothing has to remember to
+// release it and a crashed backend releases it by disconnecting. Taken as the
+// first statement of the transaction in both cases, which is what rules out a
+// cycle: the exclusive waiter holds nothing while it waits.
+//
+// The key is a hash of a fixed string, in the *single-argument* advisory
+// keyspace shared with LockFilePath's per-path lock. A repository holding a file
+// whose path hashes to the same value would take the two locks against each
+// other; the cost is that that one file's load serializes with the backstop,
+// which is what the lock is for anyway, so the collision is harmless rather than
+// merely improbable.
+//
+// What this does *not* claim to fix is two concurrent indexers of one corpus.
+// They take the lock in the same mode and so do not exclude each other, exactly
+// as before this existed.
+// ===========================================================================
+func (q *Queries) LockLinkShared(ctx context.Context) error {
+	_, err := q.db.Exec(ctx, lockLinkShared)
 	return err
 }
 
@@ -528,6 +667,25 @@ func (q *Queries) LockResolvesToByFile(ctx context.Context, ownerFileID uuid.UUI
 	return err
 }
 
+const lockResolvesToByOwners = `-- name: LockResolvesToByOwners :exec
+
+SELECT e.source_id FROM resolves_to e
+WHERE e.source_id IN (SELECT o.id FROM occurrence o WHERE o.file_id = ANY($1::uuid[]))
+ORDER BY e.source_id, e.target_id
+FOR UPDATE OF e
+`
+
+// The owner-scoped locks. Same argument as the per-file locks above -- take the
+// rows in one global order so two transactions cannot hold-and-wait in a cycle
+// -- and needed for the same reason, now that two batches' owner sets can
+// overlap even when their changed files do not. Source side only, because the
+// delete below is source side only: ownership is what an incremental re-link
+// recomputes, and an inbound edge from a file outside the set is that file's.
+func (q *Queries) LockResolvesToByOwners(ctx context.Context, ownerFileIds []uuid.UUID) error {
+	_, err := q.db.Exec(ctx, lockResolvesToByOwners, ownerFileIds)
+	return err
+}
+
 const lockTypeDefinesByFile = `-- name: LockTypeDefinesByFile :exec
 WITH victim AS (
     SELECT source_id, target_id FROM type_defines
@@ -544,6 +702,18 @@ FOR UPDATE OF e
 
 func (q *Queries) LockTypeDefinesByFile(ctx context.Context, ownerFileID uuid.UUID) error {
 	_, err := q.db.Exec(ctx, lockTypeDefinesByFile, ownerFileID)
+	return err
+}
+
+const lockTypeDefinesByOwners = `-- name: LockTypeDefinesByOwners :exec
+SELECT e.source_id FROM type_defines e
+WHERE e.source_id IN (SELECT o.id FROM occurrence o WHERE o.file_id = ANY($1::uuid[]))
+ORDER BY e.source_id, e.target_id
+FOR UPDATE OF e
+`
+
+func (q *Queries) LockTypeDefinesByOwners(ctx context.Context, ownerFileIds []uuid.UUID) error {
+	_, err := q.db.Exec(ctx, lockTypeDefinesByOwners, ownerFileIds)
 	return err
 }
 
@@ -742,6 +912,195 @@ WHERE a.role = 'reference'
 // overlay of §4.2, is what would make it exact -- both out of M2.
 func (q *Queries) RebuildTypeDefines(ctx context.Context) error {
 	_, err := q.db.Exec(ctx, rebuildTypeDefines)
+	return err
+}
+
+const relinkCalls = `-- name: RelinkCalls :exec
+WITH enclosing_callable AS (
+    SELECT DISTINCT ON (r.id) r.id AS ref_id, d.id AS def_id
+    FROM occurrence r
+    JOIN occurrence d
+      ON d.file_id = r.file_id
+     AND d.role = 'definition'
+     AND d.symbol_kind IN ('function', 'method')
+     AND d.range_start <= r.range_start
+    WHERE r.role = 'reference' AND r.file_id = ANY($1::uuid[])
+    ORDER BY r.id, d.range_start DESC, d.id
+)
+INSERT INTO calls (source_id, target_id)
+SELECT DISTINCT e.def_id, d.id
+FROM occurrence r
+JOIN occurrence d ON d.descriptor = r.descriptor AND d.role = 'definition'
+JOIN enclosing_callable e ON e.ref_id = r.id
+WHERE r.role = 'reference'
+  AND d.file_id <> r.file_id
+  AND r.symbol_kind IN ('function', 'method')
+  AND d.symbol_kind IN ('function', 'method')
+  AND e.def_id <> d.id
+`
+
+// The enclosing-callable CTE is restricted rather than the outer query, and it
+// is the same restriction: the CTE already joins `d.file_id = r.file_id`, so the
+// caller it finds is always in the referencing file, which is the file that owns
+// the edge.
+func (q *Queries) RelinkCalls(ctx context.Context, ownerFileIds []uuid.UUID) error {
+	_, err := q.db.Exec(ctx, relinkCalls, ownerFileIds)
+	return err
+}
+
+const relinkImports = `-- name: RelinkImports :exec
+INSERT INTO imports (source_id, target_id)
+SELECT DISTINCT r.file_id, d.file_id
+FROM occurrence r
+JOIN occurrence d
+  ON d.descriptor = r.descriptor
+ AND d.role = 'definition'
+ AND d.symbol_kind = 'package'
+WHERE r.role = 'reference' AND d.file_id <> r.file_id
+  AND r.file_id = ANY($1::uuid[])
+`
+
+func (q *Queries) RelinkImports(ctx context.Context, ownerFileIds []uuid.UUID) error {
+	_, err := q.db.Exec(ctx, relinkImports, ownerFileIds)
+	return err
+}
+
+const relinkOwners = `-- name: RelinkOwners :many
+
+SELECT f.id FROM file f WHERE f.path = $1
+UNION
+SELECT DISTINCT r.file_id
+FROM file f
+JOIN occurrence d ON d.file_id = f.id AND d.role = 'definition'
+JOIN occurrence r ON r.descriptor = d.descriptor AND r.role = 'reference'
+WHERE f.path = $1
+`
+
+// ===========================================================================
+// Incremental re-link (SPEC.md §7, §14 M8, Decision 5)
+//
+// The full rebuild above is a pure function of the base facts, which is why the
+// graph has been right since M2: there is no state to drift. An incremental
+// re-link is an optimization that has to produce the identical result, so
+// everything below is written to be *equal to* the rebuild restricted to a set
+// of owner files, and never to approximate it.
+//
+// **Ownership** (§7): an intra-file edge is owned by the file its endpoints
+// share; a cross-file edge is owned by its *referencing* file. Every derived
+// table but `implements` is reference-driven, so "the referencing file" is a
+// column: `resolves_to`, `calls` and `type_defines` put an occurrence of the
+// referencing file in `source_id`, and `imports` puts the referencing file
+// itself there. Re-linking an owner is therefore: delete every row whose
+// `source_id` belongs to it, and re-run the derivation restricted to it. The
+// *other* side of each join stays unrestricted -- a re-linked file matches
+// definitions anywhere in the corpus, which is what makes a definition that
+// moved between files land on its new home.
+//
+// **The owner set** is RelinkOwners below, evaluated once per changed file
+// *before* its rows are replaced and once *after*. Both halves are needed and
+// neither is a superset of the other:
+//
+//   - after: a file that references a descriptor the changed file *now* defines
+//     owns an edge that did not exist before and must be created.
+//   - before: a file that references a descriptor the changed file *used to*
+//     define owns an edge that store.deleteFile has just removed from the target
+//     side (it pointed at occurrence ids that no longer exist). If the
+//     definition moved to a third file, that owner's edge has to be recomputed
+//     against the new home; if it vanished, the edge must stay gone. Either way
+//     the owner is only reachable from the pre-replacement state, which is why
+//     this is asked before the load and not after.
+//
+// Every changed file is in the set by construction (the first branch), and it
+// has to be: store.flatten mints fresh uuids for a file's occurrences on every
+// load, so *all* of a re-loaded file's derived edges are new rows.
+//
+// Why that set is exactly right, and not merely conservative: an edge owned by
+// file U is a function of U's own rows and of the definitions matching the
+// descriptors U references. If U was not changed its own rows did not move, so
+// the edge can only change if the definition set of some descriptor U references
+// changed -- and a definition set changes only where a changed file gained or
+// lost a definition, which is precisely the union of the two evaluations above.
+// Too small a neighbourhood leaves stale edges and too large is merely slow, so
+// the argument is worth having in both directions.
+//
+// `implements` is the one derivation this cannot express; see the note above
+// RebuildImplements' incremental counterpart at the end of this section.
+// ===========================================================================
+// RelinkOwners is the neighbourhood one file contributes: the file itself, plus
+// every file holding a reference occurrence whose descriptor the file defines.
+// The join is the descriptor btree and nothing else, which is §7's "found by
+// querying base facts on `descriptor`".
+func (q *Queries) RelinkOwners(ctx context.Context, path string) ([]uuid.UUID, error) {
+	rows, err := q.db.Query(ctx, relinkOwners, path)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []uuid.UUID{}
+	for rows.Next() {
+		var id uuid.UUID
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		items = append(items, id)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const relinkResolvesTo = `-- name: RelinkResolvesTo :exec
+
+INSERT INTO resolves_to (source_id, target_id)
+SELECT DISTINCT r.id, d.id
+FROM occurrence r
+JOIN occurrence d ON d.descriptor = r.descriptor AND d.role = 'definition'
+WHERE r.role = 'reference' AND d.file_id <> r.file_id
+  AND r.file_id = ANY($1::uuid[])
+`
+
+// The four scoped derivations. Each is its Rebuild… counterpart with one
+// conjunct added, restricting the *referencing* side to the owner set; nothing
+// else about any of them moves. That is what makes the equality claim checkable
+// by reading: with the owner set equal to every file in the corpus, the added
+// conjunct is a tautology and each query below is its Rebuild… twin.
+func (q *Queries) RelinkResolvesTo(ctx context.Context, ownerFileIds []uuid.UUID) error {
+	_, err := q.db.Exec(ctx, relinkResolvesTo, ownerFileIds)
+	return err
+}
+
+const relinkTypeDefines = `-- name: RelinkTypeDefines :exec
+WITH adjacent AS (
+    SELECT id, file_id, scope_id, descriptor, role, symbol_kind,
+           lag(id) OVER w AS prev_id,
+           lag(role) OVER w AS prev_role,
+           lag(symbol_kind) OVER w AS prev_kind,
+           lag(scope_id) OVER w AS prev_scope
+    FROM occurrence
+    WHERE file_id = ANY($1::uuid[])
+    WINDOW w AS (PARTITION BY file_id ORDER BY range_start, id)
+)
+INSERT INTO type_defines (source_id, target_id)
+SELECT DISTINCT a.prev_id, d.id
+FROM adjacent a
+JOIN occurrence d ON d.descriptor = a.descriptor AND d.role = 'definition'
+WHERE a.role = 'reference'
+  AND a.symbol_kind = 'type'
+  AND a.prev_role = 'definition'
+  AND a.prev_kind IN ('variable', 'field', 'parameter', 'constant')
+  AND a.prev_scope IS NOT DISTINCT FROM a.scope_id
+  AND d.file_id <> a.file_id
+  AND a.prev_id <> d.id
+`
+
+// The adjacency window is `PARTITION BY file_id`, and the restriction is on
+// whole files, so every partition the scoped query builds is byte-identical to
+// the one the full rebuild builds. Filtering rows rather than files would move
+// the `lag` and silently change the answer, which is why the predicate is in the
+// CTE and is a file-level one.
+func (q *Queries) RelinkTypeDefines(ctx context.Context, ownerFileIds []uuid.UUID) error {
+	_, err := q.db.Exec(ctx, relinkTypeDefines, ownerFileIds)
 	return err
 }
 

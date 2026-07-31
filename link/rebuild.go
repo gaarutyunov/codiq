@@ -68,6 +68,22 @@ func RebuildAll(ctx context.Context, db DB) error {
 
 	q := sqlc.New(tx)
 
+	// The link lock, exclusive, and the first statement of the transaction
+	// (query.sql's banner). A full rebuild empties every derived table, so it
+	// cannot run beside a loader replacing the occurrences those tables point
+	// at -- the endpoint FKs would refuse one of the two with SQLSTATE 23503.
+	// Every writer of the base facts takes the same lock in shared mode, so this
+	// waits for the loads in flight and holds off the ones that start while it
+	// runs, while two loaders still run in parallel with each other. Taken
+	// first, because a waiter that holds nothing cannot be half of a cycle.
+	//
+	// It is also why nothing below takes ordered row locks the way
+	// store.deleteFile and link.Batch.Relink do: holding this exclusively means
+	// there is no second transaction to deadlock against.
+	if err := q.LockLinkExclusive(ctx); err != nil {
+		return fmt.Errorf("link: lock: %w", err)
+	}
+
 	// Delete before recompute, in the order the derivations depend on nothing:
 	// no derived table is an input to another, so the five are independent and
 	// the only ordering constraint is that a table is emptied before it is

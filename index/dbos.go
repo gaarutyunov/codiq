@@ -262,6 +262,23 @@ func Register(ctx dbos.DBOSContext, db DB, art *artifact.Store) error {
 	dbos.RegisterWorkflow(ctx, IndexRepo, dbos.WithWorkflowName(WorkflowName))
 	dbos.RegisterWorkflow(ctx, extractFile, dbos.WithWorkflowName(ExtractWorkflowName))
 
+	// SPEC.md §7's backstop, registered here so that a process which can index
+	// can also heal (schedule.go). It is a *separate* workflow and not a step of
+	// IndexRepo: IndexRepo's step sequence is what WorkflowVersion names, and
+	// folding a whole-corpus rebuild into it would both change that sequence and
+	// run a rebuild per index, which is the thing M8 removes.
+	//
+	// Registering a schedule in a one-shot process is nearly a no-op, and worth
+	// naming rather than leaving to be discovered: cmd/codiq indexes one
+	// repository and exits, so the 03:00 tick never arrives. What makes the
+	// registration right anyway is that it belongs to the executor rather than
+	// to the invocation -- the day CodiQ is run as a service, the backstop is
+	// already wired -- and that the on-demand half (RebuildLinks) is what a
+	// one-shot operator reaches for meanwhile.
+	dbos.RegisterWorkflow(ctx, ScheduledRebuild,
+		dbos.WithWorkflowName(RebuildWorkflowName),
+		dbos.WithSchedule(RebuildSchedule))
+
 	// Per-executor rather than global: there is one executor, and what the limit
 	// bounds is how many files this machine parses at once. It is no longer
 	// bounding database connections the way M2's errgroup limit was — a map task

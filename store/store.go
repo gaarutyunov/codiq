@@ -85,6 +85,25 @@ func ReplaceFile(ctx context.Context, db DB, ff facts.FileFacts) error {
 
 	q := sqlc.New(tx)
 
+	// The link lock, shared, and the first statement of the transaction
+	// (query.sql's banner, and link.RebuildAll's counterpart to it). This
+	// function is the only thing that deletes occurrences, and a full re-link
+	// inserting derived edges that point at them is the one concurrent writer it
+	// cannot survive: the endpoint FKs are plain REFERENCES, so one of the two
+	// transactions loses with SQLSTATE 23503. Shared mode is what keeps that
+	// from costing anything -- two loads still run fully in parallel, and the
+	// only transaction excluded is the exclusive one a full rebuild takes.
+	//
+	// Nested inside the batch reduce (index/reduce.go) this is a second
+	// acquisition of a lock the enclosing transaction's session already holds,
+	// which advisory locks count rather than conflict on. It is taken here as
+	// well so that the standalone per-file path -- index.Run, and any direct
+	// caller -- is covered by the same rule instead of by its caller's
+	// diligence.
+	if err := q.LockLinkShared(ctx); err != nil {
+		return fmt.Errorf("store: lock %s: %w", ff.File.Path, err)
+	}
+
 	fileID, err := resolveFile(ctx, q, ff.File)
 	if err != nil {
 		return fmt.Errorf("store: resolve %s: %w", ff.File.Path, err)
