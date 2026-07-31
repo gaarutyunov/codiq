@@ -51,8 +51,9 @@ func TestWalkSelectsOnlySupportedFiles(t *testing.T) {
 	// Guards the assumption every case below rests on: the walk filters on
 	// extract's registry, so a case listing a ".rs" file as unsupported is only
 	// meaningful while ".rs" really is. ".ts" was that file until M6 registered
-	// the TypeScript stanza, which is the tripwire working as intended.
-	require.Equal(t, []string{".go", ".ts"}, extract.Extensions(),
+	// the TypeScript stanza and ".py" until M7 registered the Python one, which
+	// is the tripwire working as intended.
+	require.Equal(t, []string{".go", ".py", ".ts"}, extract.Extensions(),
 		"the registry grew a language; revisit the unsupported files in these cases")
 
 	tests := []struct {
@@ -68,12 +69,13 @@ func TestWalkSelectsOnlySupportedFiles(t *testing.T) {
 				"README.md":  "# nope\n",
 				"query.scm":  "(nope)\n",
 				"app.ts":     "export {}\n",
+				"app.py":     "x = 1\n",
 				"app.rs":     "fn main() {}\n",
 				"Makefile":   "all:\n",
 				"noext":      "\n",
 				"go.mod.bak": goMod,
 			},
-			want: []string{"app.ts", "main.go"},
+			want: []string{"app.py", "app.ts", "main.go"},
 		},
 		{
 			name: "nested packages are walked",
