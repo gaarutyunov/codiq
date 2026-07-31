@@ -19,7 +19,23 @@ const (
 // GoModFile is the manifest FromGoMod reads.
 const GoModFile = "go.mod"
 
-func init() { Register(GoModFile, FromGoMod) }
+// GoExt is the file extension the Go ecosystem owns, and so the extension whose
+// files are stamped with a go.mod's coordinate.
+//
+// It repeats extract/golang.Ext, which this package cannot import — extract
+// imports coord, and the dependency may not run the other way — so the two are
+// held to agree by a test instead (Extensions).
+const GoExt = ".go"
+
+func init() {
+	Register(Ecosystem{
+		Manifest: GoModFile,
+		Scheme:   GoScheme,
+		Manager:  GoManager,
+		Exts:     []string{GoExt},
+		From:     FromGoMod,
+	})
+}
 
 // majorSuffix matches a Go module path's major-version suffix.
 var majorSuffix = regexp.MustCompile(`/(v[2-9][0-9]*)$`)

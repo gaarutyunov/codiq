@@ -158,7 +158,19 @@ const queuePollInterval = 10 * time.Millisecond
 // the old build or clears it. That is the same price M4 paid, and it is the
 // right one here — the alternative is not "those runs finish", it is "those runs
 // finish wrong".
-const WorkflowVersion = "codiq-index-3"
+//
+// M6 moves it again, to `-4`, and for exactly the reason M5 moved it: the step
+// *sequence* is untouched — still resolve, walk, one enqueue and one await per
+// file, reduce — and the recorded payload's type is not. The resolve step used
+// to record a site holding one coord.Coord for the whole repository; it now
+// records a coord.Set, one coordinate per ecosystem keyed by extension, because
+// a coordinate is a property of (repository, ecosystem) (coord's doc comment).
+// Both are JSON objects, so an M5 checkpoint replayed against this code would
+// not fail — `site.coords` would simply be absent, every file would be handed
+// the zero Coord, and the batch would write a whole repository of descriptors
+// reading `. . . .`. That is the same silent-wrong-index outcome `-3` exists to
+// make unreachable, so `-4` does the same for the runs `-3` left behind.
+const WorkflowVersion = "codiq-index-4"
 
 // RunIDPrefix is the prefix shared by the workflow IDs of every index of target,
 // which must be an absolute path. NewRunID mints one; a caller finds an
@@ -286,16 +298,22 @@ func IndexRepo(ctx dbos.DBOSContext, repo string) (Result, error) {
 }
 
 // site is what resolving the repository establishes once, before any file is
-// read: where the tree is and what coordinate its files belong to.
+// read: where the tree is and what coordinates its files belong to.
 //
 // It is a step's output, so it is checkpointed — which is the point. Root is
 // derived from the process's working directory, and a recovering process need
 // not have the same one; taking Root from the checkpoint rather than resolving
 // it again means the resumed half of a run indexes the same tree as the first
-// half, under the same coordinate, or fails loudly because the tree is gone.
+// half, under the same coordinates, or fails loudly because the tree is gone.
+//
+// Coords and not Coord: a repository holding a go.mod beside a package.json has
+// one coordinate per ecosystem, and each file is stamped with its own language's
+// (coord.Set). A coord.Set is a struct around a map with string keys, so it
+// survives the checkpoint and encoding/json writes it in sorted key order — the
+// two properties a replayed step's output has to have.
 type site struct {
-	Root  string      `json:"root"`
-	Coord coord.Coord `json:"coord"`
+	Root   string    `json:"root"`
+	Coords coord.Set `json:"coords"`
 }
 
 func (reg *registration) indexRepo(ctx dbos.DBOSContext, repo string) (Result, error) {
@@ -319,7 +337,7 @@ func (reg *registration) indexRepo(ctx dbos.DBOSContext, repo string) (Result, e
 		return Result{}, fmt.Errorf("index: walk %s: %w", repo, err)
 	}
 
-	res := Result{Coord: s.Coord, Files: len(paths), Concurrency: reg.l.limit}
+	res := Result{Coord: s.Coords.Primary, Coords: s.Coords, Files: len(paths), Concurrency: reg.l.limit}
 
 	keys, skipped, err := reg.mapFiles(ctx, s, paths)
 	// The skips are reported even when the map phase failed outright: they are
@@ -359,12 +377,18 @@ func (reg *registration) indexRepo(ctx dbos.DBOSContext, repo string) (Result, e
 // checkpointed output, and re-resolving them in a worker — possibly in a process
 // with a different working directory — is how the two halves of a resumed run
 // would come to disagree about which tree they are indexing.
+//
+// One Coord and not the whole coord.Set, because the task extracts one file and
+// a file belongs to one ecosystem. Which one is decided by the parent, from the
+// frozen set, in path order — so the choice is as replayable as the rest of the
+// enqueue loop.
 type fileRef struct {
 	// Root is the absolute repository root, as the resolve step froze it.
 	Root string `json:"root"`
 	// Path is repo-relative and slash-separated, as the `file` table stores it.
 	Path string `json:"path"`
-	// Coord is the package coordinate every symbol in the file is prefixed with.
+	// Coord is the package coordinate every symbol in the file is prefixed with:
+	// the coordinate of *this file's* ecosystem, not the repository's.
 	Coord coord.Coord `json:"coord"`
 }
 
@@ -515,7 +539,7 @@ func (reg *registration) mapFiles(ctx dbos.DBOSContext, s site, paths []string) 
 	handles := make([]dbos.WorkflowHandle[extracted], 0, len(paths))
 	for _, rel := range paths {
 		h, err := dbos.RunWorkflow(ctx, extractFile,
-			fileRef{Root: s.Root, Path: rel, Coord: s.Coord},
+			fileRef{Root: s.Root, Path: rel, Coord: s.Coords.For(rel)},
 			dbos.WithQueue(QueueName))
 		if err != nil {
 			return nil, nil, fmt.Errorf("index: enqueue %s: %w", rel, err)
@@ -647,22 +671,24 @@ func (reg *registration) reviveCancelled(handles []dbos.WorkflowHandle[extracted
 	return nil
 }
 
-// resolve establishes the tree's root and coordinate, once per run.
+// resolve establishes the tree's root and coordinates, once per run.
 //
 // It is loader.run's first two operations verbatim, lifted out so they can be a
-// single step: the coordinate comes from a manifest outside any file being
-// parsed (SPEC.md §4.3), so resolving it once is both the correct thing and the
-// cheap thing.
+// single step: a coordinate comes from a manifest outside any file being parsed
+// (SPEC.md §4.3), so resolving them once is both the correct thing and the cheap
+// thing. Once per run and one per ecosystem are not in tension — coord.Resolve
+// reads every registered manifest from one directory, so the whole set costs the
+// one upward search a single coordinate used to.
 func resolve(repo string) (site, error) {
 	root, err := filepath.Abs(repo)
 	if err != nil {
 		return site{}, fmt.Errorf("index: %s: %w", repo, err)
 	}
-	c, err := coord.Resolve(root)
+	coords, err := coord.Resolve(root)
 	if err != nil {
 		return site{}, fmt.Errorf("index: %w", err)
 	}
-	return site{Root: root, Coord: c}, nil
+	return site{Root: root, Coords: coords}, nil
 }
 
 // walkRelative is walk, with its paths rendered the way the `file` table renders

@@ -59,7 +59,7 @@ func TestExtractedFactsSurviveTheArtifact(t *testing.T) {
 	for path, content := range module {
 		require.NoError(t, os.WriteFile(filepath.Join(root, path), []byte(content), 0o644))
 	}
-	c, err := coord.Resolve(root)
+	coords, err := coord.Resolve(root)
 	require.NoError(t, err)
 
 	s, err := artifact.Open(t.TempDir())
@@ -74,7 +74,7 @@ func TestExtractedFactsSurviveTheArtifact(t *testing.T) {
 			src, err := os.ReadFile(path)
 			require.NoError(t, err)
 
-			in := parser.Parse(path, src, c)
+			in := parser.Parse(path, src, coords.For(path))
 			in.File.Path = rel
 			require.Empty(t, in.ParseError)
 			require.NotEmpty(t, in.Occurrences, "the fixture has to exercise the shapes")
@@ -109,7 +109,7 @@ func TestTheFixtureExercisesEveryShape(t *testing.T) {
 	for path, content := range module {
 		require.NoError(t, os.WriteFile(filepath.Join(root, path), []byte(content), 0o644))
 	}
-	c, err := coord.Resolve(root)
+	coords, err := coord.Resolve(root)
 	require.NoError(t, err)
 
 	roles := map[facts.Role]bool{}
@@ -122,7 +122,7 @@ func TestTheFixtureExercisesEveryShape(t *testing.T) {
 		require.True(t, ok)
 		src, err := os.ReadFile(path)
 		require.NoError(t, err)
-		ff := parser.Parse(path, src, c)
+		ff := parser.Parse(path, src, coords.For(path))
 		for _, o := range ff.Occurrences {
 			roles[o.Role] = true
 			prefixes[o.Descriptor.Prefix.Prefix()] = true
@@ -170,7 +170,7 @@ func TestArtifactSizeAgainstTheSource(t *testing.T) {
 	for path, content := range module {
 		require.NoError(t, os.WriteFile(filepath.Join(root, path), []byte(content), 0o644))
 	}
-	c, err := coord.Resolve(root)
+	coords, err := coord.Resolve(root)
 	require.NoError(t, err)
 
 	s, err := artifact.Open(t.TempDir())
@@ -184,7 +184,7 @@ func TestArtifactSizeAgainstTheSource(t *testing.T) {
 		require.True(t, ok)
 		src, err := os.ReadFile(path)
 		require.NoError(t, err)
-		ff := parser.Parse(path, src, c)
+		ff := parser.Parse(path, src, coords.For(path))
 		ff.File.Path = rel
 
 		key := artifact.Key(root, rel)

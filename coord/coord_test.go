@@ -9,6 +9,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/gaarutyunov/codiq/coord"
+	"github.com/gaarutyunov/codiq/extract"
 )
 
 func writeGoMod(t *testing.T, body string) string {
@@ -234,16 +235,52 @@ func TestResolve(t *testing.T) {
 	require.NoError(t, os.MkdirAll(nested, 0o750))
 
 	t.Run("finds the manifest above the directory", func(t *testing.T) {
-		got, err := coord.Resolve(nested)
+		set, err := coord.Resolve(nested)
 		require.NoError(t, err)
+		got := set.For("x" + coord.GoExt)
 		assert.Equal(t, "github.com/foo/bar", got.Name)
 		// Root is the manifest's directory, not the directory asked about, so
 		// namespaces are relative to the module.
 		assert.Equal(t, "internal/deep/", got.Namespace(filepath.Join(nested, "x.go")))
 	})
 
+	t.Run("names the one ecosystem it found", func(t *testing.T) {
+		set, err := coord.Resolve(nested)
+		require.NoError(t, err)
+		// A repository with a single ecosystem has exactly the coordinate it
+		// had before coordinates became per-ecosystem, and Primary is where a
+		// report with room for one still finds it.
+		assert.Equal(t, "scip-go gomod github.com/foo/bar .", set.Primary.Prefix())
+	})
+
+	t.Run("an ecosystem with no manifest is not another ecosystem's", func(t *testing.T) {
+		set, err := coord.Resolve(nested)
+		require.NoError(t, err)
+		// There is no package.json anywhere above this tree. A .ts file in it
+		// still needs a coordinate, and the one thing it must not be given is
+		// the Go module's: that is what made a TypeScript class and a Go type
+		// render the same descriptor.
+		ts := set.For("x" + coord.TSExt)
+		assert.Equal(t, "scip-typescript npm . .", ts.Prefix())
+		assert.NotEqual(t, set.For("x"+coord.GoExt).Prefix(), ts.Prefix())
+		assert.Equal(t, "internal/deep/", ts.Namespace(filepath.Join(nested, "x.ts")),
+			"an unknown package still separates one directory from another")
+	})
+
 	t.Run("reports no manifest", func(t *testing.T) {
 		_, err := coord.Resolve(t.TempDir())
 		require.ErrorIs(t, err, coord.ErrNoManifest)
 	})
+}
+
+// TestExtensionsMatchTheParserRegistry is the check coord cannot make of itself.
+//
+// Every extension a parser reads has to be owned by an ecosystem, or files with
+// that extension are stamped with no scheme at all; every extension an ecosystem
+// owns has to have a parser, or the registration is one nothing consults. coord
+// cannot assert this from non-test code — extract imports coord, and the
+// dependency may not run the other way — so the external test package does it.
+func TestExtensionsMatchTheParserRegistry(t *testing.T) {
+	assert.Equal(t, extract.Extensions(), coord.Extensions(),
+		"every parsed extension needs an ecosystem to give it a coordinate, and vice versa")
 }

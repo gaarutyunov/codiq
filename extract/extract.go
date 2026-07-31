@@ -16,6 +16,7 @@ import (
 
 	"github.com/gaarutyunov/codiq/coord"
 	"github.com/gaarutyunov/codiq/extract/golang"
+	"github.com/gaarutyunov/codiq/extract/ts"
 	"github.com/gaarutyunov/codiq/facts"
 )
 
@@ -29,9 +30,13 @@ type Parser interface {
 	Parse(path string, src []byte, coord coord.Coord) facts.FileFacts
 }
 
-// byExt maps a file extension to its parser. golang.Parser satisfies Parser
-// structurally; the map literal is the compile-time check that it still does.
-var byExt = map[string]Parser{".go": golang.New()}
+// byExt maps a file extension to its parser. Each language sub-package's Parser
+// satisfies Parser structurally; the map literal is the compile-time check that
+// they all still do.
+var byExt = map[string]Parser{
+	golang.Ext: golang.New(),
+	ts.Ext:     ts.New(),
+}
 
 // ParserFor returns the parser registered for path's extension.
 func ParserFor(path string) (Parser, bool) {
