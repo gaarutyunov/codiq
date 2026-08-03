@@ -62,8 +62,13 @@ func TestWalkSelectsOnlySupportedFiles(t *testing.T) {
 	// §14 M9+'s Kotlin task and ".class" is a build output of a language already
 	// registered, so a case resting on either will need this same edit again.
 	// Haskell is on no roadmap in SPEC.md, so a ".hs" file is unsupported for a
-	// reason that is not a scheduling accident.
-	require.Equal(t, []string{".cs", ".go", ".java", ".php", ".py", ".rb", ".rs", ".ts"}, extract.Extensions(),
+	// reason that is not a scheduling accident — and it survived the C/C++
+	// stanza, which took ".h", ".hh", ".hpp" and ".hxx" in one edit and came
+	// within one letter of consuming the canary too.
+	require.Equal(t, []string{
+		".c", ".cc", ".cpp", ".cs", ".cxx", ".go", ".h", ".hh", ".hpp", ".hxx",
+		".java", ".php", ".py", ".rb", ".rs", ".ts",
+	}, extract.Extensions(),
 		"the registry grew a language; revisit the unsupported files in these cases")
 
 	tests := []struct {
@@ -85,6 +90,12 @@ func TestWalkSelectsOnlySupportedFiles(t *testing.T) {
 				"App.cs":     "class App { }\n",
 				"app.rb":     "class App; end\n",
 				"App.php":    "<?php\nclass App {}\n",
+				"app.c":      "void run(void) {}\n",
+				"app.h":      "void run(void);\n",
+				"app.cpp":    "void run() {}\n",
+				"app.hpp":    "void run();\n",
+				"app.inl":    "inline void run() {}\n",
+				"app.o":      "\x00\x00\x00\x00",
 				"App.hs":     "main :: IO ()\n",
 				"App.kt":     "class App\n",
 				"App.class":  "\x00\x00\x00\x00",
@@ -92,7 +103,10 @@ func TestWalkSelectsOnlySupportedFiles(t *testing.T) {
 				"noext":      "\n",
 				"go.mod.bak": goMod,
 			},
-			want: []string{"App.cs", "App.java", "App.php", "app.py", "app.rb", "app.rs", "app.ts", "main.go"},
+			want: []string{
+				"App.cs", "App.java", "App.php", "app.c", "app.cpp", "app.h",
+				"app.hpp", "app.py", "app.rb", "app.rs", "app.ts", "main.go",
+			},
 		},
 		{
 			name: "nested packages are walked",
