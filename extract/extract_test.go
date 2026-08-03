@@ -2,6 +2,7 @@ package extract_test
 
 import (
 	"path/filepath"
+	"sort"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -9,6 +10,7 @@ import (
 
 	"github.com/gaarutyunov/codiq/coord"
 	"github.com/gaarutyunov/codiq/extract"
+	"github.com/gaarutyunov/codiq/extract/cc"
 	"github.com/gaarutyunov/codiq/extract/cs"
 	"github.com/gaarutyunov/codiq/extract/golang"
 	"github.com/gaarutyunov/codiq/extract/java"
@@ -52,6 +54,15 @@ func TestParserFor(t *testing.T) {
 		{name: "a PHP template, which is mostly HTML and needs its own grammar", path: filepath.FromSlash("/repo/views/index.phtml"), want: false},
 		{name: "a legacy PHP extension no ecosystem owns", path: filepath.FromSlash("/repo/legacy/util.php5"), want: false},
 		{name: "a Composer manifest, which is a manifest and not a source", path: filepath.FromSlash("/repo/composer.json"), want: false},
+		{name: "a C translation unit", path: filepath.FromSlash("/repo/src/greeter.c"), want: true},
+		{name: "a C header, which may be C or C++ and is read as C++", path: filepath.FromSlash("/repo/include/greeter.h"), want: true},
+		{name: "a C++ translation unit", path: filepath.FromSlash("/repo/src/greeter.cpp"), want: true},
+		{name: "the other two C++ source spellings", path: filepath.FromSlash("/repo/src/greeter.cxx"), want: true},
+		{name: "a C++ header", path: filepath.FromSlash("/repo/include/greeter.hpp"), want: true},
+		{name: "an inline fragment, which is included mid-header and is not a translation unit", path: filepath.FromSlash("/repo/include/greeter.inl"), want: false},
+		{name: "the historical uppercase C++ source, which a case-insensitive filesystem cannot be trusted with", path: filepath.FromSlash("/repo/src/greeter.C"), want: false},
+		{name: "a CMake listfile, which is a manifest and not a source", path: filepath.FromSlash("/repo/CMakeLists.txt"), want: false},
+		{name: "an object file, which is a build output", path: filepath.FromSlash("/repo/src/greeter.o"), want: false},
 		{name: "no extension", path: filepath.FromSlash("/repo/Makefile"), want: false},
 		{name: "an unregistered extension", path: filepath.FromSlash("/repo/App.kt"), want: false},
 		{name: "the extension is case sensitive", path: filepath.FromSlash("/repo/main.GO"), want: false},
@@ -76,7 +87,71 @@ func TestParserFor(t *testing.T) {
 // filters on (index) and what every ecosystem has to own a coordinate for
 // (coord.Extensions). Extensions() returns them sorted.
 func TestExtensions(t *testing.T) {
-	assert.Equal(t, []string{cs.Ext, golang.Ext, java.Ext, php.Ext, py.Ext, rb.Ext, rs.Ext, ts.Ext}, extract.Extensions())
+	want := []string{cs.Ext, golang.Ext, java.Ext, php.Ext, py.Ext, rb.Ext, rs.Ext, ts.Ext}
+	want = append(want, cc.Exts...)
+	sort.Strings(want)
+	assert.Equal(t, want, extract.Extensions())
+
+	// The C/C++ stanza is the first to own more than one extension, and it owns
+	// eight — half the registry. The set is spelled out here rather than only
+	// referenced, so that adding a ninth is a deliberate edit in two places.
+	assert.Equal(t, []string{".c", ".cc", ".cpp", ".cxx", ".h", ".hh", ".hpp", ".hxx"}, cc.Exts)
+}
+
+// TestCCParserSatisfiesParserStructurally is the ninth, and the claim it makes
+// is the registry's rather than any one language's: nine sub-packages written
+// independently satisfy Parser, none of them imports extract, and the byExt
+// literal in extract.go is the whole of the compile-time check that they do.
+func TestCCParserSatisfiesParserStructurally(t *testing.T) {
+	var p extract.Parser = cc.New()
+	assert.NotNil(t, p)
+}
+
+// TestRegisteredCCParserParses is TestRegisteredParserParses for C: the entry
+// for ".c" is a working parser and not just a non-nil interface value, and the
+// descriptor it produces carries the CMake coordinate — with **no namespace at
+// all**, which is the one part of C's rule that shows up in a one-line file and
+// the thing that lets a header in `include/` and a source in `src/` name one
+// symbol.
+func TestRegisteredCCParserParses(t *testing.T) {
+	path := filepath.FromSlash("/repo/src/greeter.c")
+	p, ok := extract.ParserFor(path)
+	require.True(t, ok)
+
+	c := coord.Coord{
+		Scheme: coord.CCScheme, Manager: coord.CMakeManager,
+		Name: "greeter", Version: "1.0.0", Root: filepath.FromSlash("/repo"),
+	}
+	ff := p.Parse(path, []byte("void greet(void) {}\n"), c)
+
+	require.Empty(t, ff.ParseError)
+	assert.Equal(t, cc.Lang, ff.File.Lang)
+	assert.Equal(t, c, ff.File.Coord)
+
+	descriptors := make([]string, 0, len(ff.Occurrences))
+	for _, occ := range ff.Occurrences {
+		descriptors = append(descriptors, occ.Descriptor.String())
+	}
+	assert.Contains(t, descriptors, "scip-cc cmake greeter 1.0.0 greet().")
+}
+
+// TestTheHeaderAndTheSourceShareOneParserAndOneLang is the registry-level half
+// of the `.h` decision. Eight extensions, one Parser value, one `file.lang` —
+// because a `.h` does not say whether it is C or C++, and tagging it as one
+// language while its `.c` is another would make a pure-C project's
+// header-resolves-into-source edge a cross-language edge (the invariant
+// test/integration/m6_test.go's noCrossLanguageEdges asserts).
+func TestTheHeaderAndTheSourceShareOneParserAndOneLang(t *testing.T) {
+	c := coord.Coord{
+		Scheme: coord.CCScheme, Manager: coord.CMakeManager,
+		Name: "greeter", Version: "1.0.0", Root: filepath.FromSlash("/repo"),
+	}
+	for _, rel := range []string{"greeter.h", "greeter.c", "greeter.hpp", "greeter.cpp"} {
+		path := filepath.FromSlash("/repo/" + rel)
+		p, ok := extract.ParserFor(path)
+		require.True(t, ok, rel)
+		assert.Equal(t, cc.Lang, p.Parse(path, []byte("void greet(void);\n"), c).File.Lang, rel)
+	}
 }
 
 // TestRegisteredParserParses is the end-to-end check on the registry: the entry

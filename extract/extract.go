@@ -15,6 +15,7 @@ import (
 	"sort"
 
 	"github.com/gaarutyunov/codiq/coord"
+	"github.com/gaarutyunov/codiq/extract/cc"
 	"github.com/gaarutyunov/codiq/extract/cs"
 	"github.com/gaarutyunov/codiq/extract/golang"
 	"github.com/gaarutyunov/codiq/extract/java"
@@ -39,16 +40,28 @@ type Parser interface {
 // byExt maps a file extension to its parser. Each language sub-package's Parser
 // satisfies Parser structurally; the map literal is the compile-time check that
 // they all still do.
-var byExt = map[string]Parser{
-	cs.Ext:     cs.New(),
-	golang.Ext: golang.New(),
-	java.Ext:   java.New(),
-	php.Ext:    php.New(),
-	py.Ext:     py.New(),
-	rb.Ext:     rb.New(),
-	rs.Ext:     rs.New(),
-	ts.Ext:     ts.New(),
-}
+//
+// C and C++ are one entry per extension and one parser for all eight, which is
+// the first time a language sub-package has owned more than one. It is not a
+// convenience: a `.h` does not say whether it is C or C++, and cc.Lang is one
+// tag for the same reason — see extract/cc's package comment.
+var byExt = func() map[string]Parser {
+	m := map[string]Parser{
+		cs.Ext:     cs.New(),
+		golang.Ext: golang.New(),
+		java.Ext:   java.New(),
+		php.Ext:    php.New(),
+		py.Ext:     py.New(),
+		rb.Ext:     rb.New(),
+		rs.Ext:     rs.New(),
+		ts.Ext:     ts.New(),
+	}
+	ccParser := cc.New()
+	for _, ext := range cc.Exts {
+		m[ext] = ccParser
+	}
+	return m
+}()
 
 // ParserFor returns the parser registered for path's extension.
 func ParserFor(path string) (Parser, bool) {
