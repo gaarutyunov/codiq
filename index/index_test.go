@@ -65,10 +65,13 @@ func TestWalkSelectsOnlySupportedFiles(t *testing.T) {
 	// registered (".class"). Haskell is on no roadmap in SPEC.md, so a ".hs" file
 	// is unsupported for a reason that is not a scheduling accident — and it has
 	// now survived the C/C++ stanza, which took ".h", ".hh", ".hpp" and ".hxx" in
-	// one edit and came within one letter of consuming the canary too.
+	// one edit and came within one letter of consuming the canary too, and the
+	// Swift stanza, which took ".swift" — the ninth edit, and the first that made
+	// an *ecosystem's manifest* a walked source file, since `Package.swift` is
+	// Swift. The case below says so rather than leaving it to be discovered.
 	require.Equal(t, []string{
 		".c", ".cc", ".cpp", ".cs", ".cxx", ".go", ".h", ".hh", ".hpp", ".hxx",
-		".java", ".kt", ".kts", ".php", ".py", ".rb", ".rs", ".ts",
+		".java", ".kt", ".kts", ".php", ".py", ".rb", ".rs", ".swift", ".ts",
 	}, extract.Extensions(),
 		"the registry grew a language; revisit the unsupported files in these cases")
 
@@ -104,11 +107,22 @@ func TestWalkSelectsOnlySupportedFiles(t *testing.T) {
 				"Makefile":   "all:\n",
 				"noext":      "\n",
 				"go.mod.bak": goMod,
+
+				// Swift, and the one file in this list that is a *manifest* and
+				// a source at once. `Package.swift` is Swift, so the walk takes
+				// it — deliberately, and pinned here because it is the first
+				// time an ecosystem's own manifest has been indexed as a
+				// compilation unit; extract/swift descriptors its declarations
+				// apart so that two manifests never collide.
+				// `.swiftinterface` is a compiler output, like `.class`.
+				"app.swift":          "struct App {}\n",
+				"Package.swift":      "let package = Package(name: \"x\")\n",
+				"App.swiftinterface": "public struct App {}\n",
 			},
 			want: []string{
-				"App.cs", "App.java", "App.kt", "App.kts", "App.php", "app.c",
-				"app.cpp", "app.h", "app.hpp", "app.py", "app.rb", "app.rs",
-				"app.ts", "main.go",
+				"App.cs", "App.java", "App.kt", "App.kts", "App.php",
+				"Package.swift", "app.c", "app.cpp", "app.h", "app.hpp",
+				"app.py", "app.rb", "app.rs", "app.swift", "app.ts", "main.go",
 			},
 		},
 		{
