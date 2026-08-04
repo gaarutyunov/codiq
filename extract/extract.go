@@ -19,6 +19,7 @@ import (
 	"github.com/gaarutyunov/codiq/extract/cs"
 	"github.com/gaarutyunov/codiq/extract/golang"
 	"github.com/gaarutyunov/codiq/extract/java"
+	"github.com/gaarutyunov/codiq/extract/kotlin"
 	"github.com/gaarutyunov/codiq/extract/php"
 	"github.com/gaarutyunov/codiq/extract/py"
 	"github.com/gaarutyunov/codiq/extract/rb"
@@ -45,6 +46,11 @@ type Parser interface {
 // the first time a language sub-package has owned more than one. It is not a
 // convenience: a `.h` does not say whether it is C or C++, and cc.Lang is one
 // tag for the same reason — see extract/cc's package comment.
+//
+// Kotlin owns two for a different reason: `.kt` and `.kts` are one language read
+// by one grammar, and what separates a script from a compilation unit is where
+// its declarations hang rather than how they are read — which is the stanza's
+// business and not the registry's.
 var byExt = func() map[string]Parser {
 	m := map[string]Parser{
 		cs.Ext:     cs.New(),
@@ -59,6 +65,10 @@ var byExt = func() map[string]Parser {
 	ccParser := cc.New()
 	for _, ext := range cc.Exts {
 		m[ext] = ccParser
+	}
+	ktParser := kotlin.New()
+	for _, ext := range kotlin.Exts {
+		m[ext] = ktParser
 	}
 	return m
 }()
