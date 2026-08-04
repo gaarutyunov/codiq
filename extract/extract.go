@@ -24,6 +24,7 @@ import (
 	"github.com/gaarutyunov/codiq/extract/py"
 	"github.com/gaarutyunov/codiq/extract/rb"
 	"github.com/gaarutyunov/codiq/extract/rs"
+	"github.com/gaarutyunov/codiq/extract/swift"
 	"github.com/gaarutyunov/codiq/extract/ts"
 	"github.com/gaarutyunov/codiq/facts"
 )
@@ -51,6 +52,12 @@ type Parser interface {
 // by one grammar, and what separates a script from a compilation unit is where
 // its declarations hang rather than how they are read — which is the stanza's
 // business and not the registry's.
+//
+// Swift owns one, and it is the first that also owns an *ecosystem's manifest*:
+// `Package.swift` is Swift, so the entry below hands SwiftPM's own build file to
+// the Swift stanza as a source file. That is deliberate and needs no special
+// case here — a manifest is a compilation unit, so where its declarations hang
+// is the stanza's business, exactly as a `.kts`'s is. See extract/swift.
 var byExt = func() map[string]Parser {
 	m := map[string]Parser{
 		cs.Ext:     cs.New(),
@@ -60,6 +67,7 @@ var byExt = func() map[string]Parser {
 		py.Ext:     py.New(),
 		rb.Ext:     rb.New(),
 		rs.Ext:     rs.New(),
+		swift.Ext:  swift.New(),
 		ts.Ext:     ts.New(),
 	}
 	ccParser := cc.New()

@@ -19,6 +19,7 @@ import (
 	"github.com/gaarutyunov/codiq/extract/py"
 	"github.com/gaarutyunov/codiq/extract/rb"
 	"github.com/gaarutyunov/codiq/extract/rs"
+	"github.com/gaarutyunov/codiq/extract/swift"
 	"github.com/gaarutyunov/codiq/extract/ts"
 )
 
@@ -69,6 +70,11 @@ func TestParserFor(t *testing.T) {
 		{name: "a Kotlin script, which is Kotlin and is read with the same grammar", path: filepath.FromSlash("/repo/build.gradle.kts"), want: true},
 		{name: "a Gradle settings file in the Groovy DSL, which is neither Kotlin nor a manifest this reads", path: filepath.FromSlash("/repo/settings.gradle"), want: false},
 		{name: "a Kotlin module file, which the toolchain stopped writing in 1.4", path: filepath.FromSlash("/repo/module.ktm"), want: false},
+		{name: "a Swift compilation unit", path: filepath.FromSlash("/repo/Sources/Greeter/Greeter.swift"), want: true},
+		{name: "a SwiftPM manifest, which is a manifest and a compilation unit at once", path: filepath.FromSlash("/repo/Package.swift"), want: true},
+		{name: "a tools-version-specific manifest, which is the same file under another name", path: filepath.FromSlash("/repo/Package@swift-5.9.swift"), want: true},
+		{name: "a textual module interface, which is a compiler output and not a source", path: filepath.FromSlash("/repo/App.swiftinterface"), want: false},
+		{name: "an Objective-C implementation, which shares Swift's runtime and not its grammar", path: filepath.FromSlash("/repo/Greeter.m"), want: false},
 		{name: "an unregistered extension", path: filepath.FromSlash("/repo/App.hs"), want: false},
 		{name: "the extension is case sensitive", path: filepath.FromSlash("/repo/main.GO"), want: false},
 		{name: "not the whole name", path: filepath.FromSlash("/repo/go"), want: false},
@@ -92,7 +98,7 @@ func TestParserFor(t *testing.T) {
 // filters on (index) and what every ecosystem has to own a coordinate for
 // (coord.Extensions). Extensions() returns them sorted.
 func TestExtensions(t *testing.T) {
-	want := []string{cs.Ext, golang.Ext, java.Ext, php.Ext, py.Ext, rb.Ext, rs.Ext, ts.Ext}
+	want := []string{cs.Ext, golang.Ext, java.Ext, php.Ext, py.Ext, rb.Ext, rs.Ext, swift.Ext, ts.Ext}
 	want = append(want, cc.Exts...)
 	want = append(want, kotlin.Exts...)
 	sort.Strings(want)
@@ -103,6 +109,15 @@ func TestExtensions(t *testing.T) {
 	// edit in two places.
 	assert.Equal(t, []string{".c", ".cc", ".cpp", ".cxx", ".h", ".hh", ".hpp", ".hxx"}, cc.Exts)
 	assert.Equal(t, []string{".kt", ".kts"}, kotlin.Exts)
+
+	// Swift owns one extension, and that extension owns the *ecosystem's own
+	// manifest*: `Package.swift` is a `.swift`, so the registry cannot hand it
+	// to anything but the Swift stanza. Spelled out here because it is the one
+	// registry fact this language added that no earlier one could have — see
+	// TestAManifestIsAlsoASource for what the stanza does with it.
+	assert.Equal(t, ".swift", swift.Ext)
+	assert.Equal(t, filepath.Ext(coord.PackageManifest), swift.Ext,
+		"the SwiftPM manifest is a Swift source file; the registry has no way to say otherwise")
 }
 
 // TestCCParserSatisfiesParserStructurally is the ninth, and the claim it makes
@@ -214,6 +229,90 @@ func TestAScriptAndASourceShareOneParserAndOneLang(t *testing.T) {
 		require.True(t, ok, rel)
 		assert.Equal(t, kotlin.Lang, p.Parse(path, []byte("val x = 1\n"), c).File.Lang, rel)
 	}
+}
+
+// TestSwiftParserSatisfiesParserStructurally is the eleventh, and the claim it
+// makes is the registry's rather than any one language's: eleven sub-packages
+// written independently satisfy Parser, none of them imports extract, and the
+// byExt literal in extract.go is the whole of the compile-time check that they
+// do.
+func TestSwiftParserSatisfiesParserStructurally(t *testing.T) {
+	var p extract.Parser = swift.New()
+	assert.NotNil(t, p)
+}
+
+// TestRegisteredSwiftParserParses is TestRegisteredParserParses for Swift: the
+// entry for ".swift" is a working parser and not just a non-nil interface value,
+// and the descriptor it produces carries the namespace derived from the
+// `Sources/<Module>/` path rule — which is the whole of Swift's namespace story,
+// since the language writes no namespace declaration anywhere and the target
+// that defines the module is declared in `Package.swift`, a file §2.5 forbids
+// the extractor from reading.
+func TestRegisteredSwiftParserParses(t *testing.T) {
+	path := filepath.FromSlash("/repo/Sources/Greeter/Greeter.swift")
+	p, ok := extract.ParserFor(path)
+	require.True(t, ok)
+
+	c := coord.Coord{
+		Scheme: coord.SwiftScheme, Manager: coord.SwiftPMManager,
+		Name: "greeter", Version: coord.Unknown, Root: filepath.FromSlash("/repo"),
+	}
+	src := "public struct Greeter {\n    public func greet() -> String { return \"\" }\n}\n"
+	ff := p.Parse(path, []byte(src), c)
+
+	require.Empty(t, ff.ParseError)
+	assert.Equal(t, swift.Lang, ff.File.Lang)
+	assert.Equal(t, c, ff.File.Coord)
+
+	descriptors := make([]string, 0, len(ff.Occurrences))
+	for _, occ := range ff.Occurrences {
+		descriptors = append(descriptors, occ.Descriptor.String())
+	}
+	assert.Contains(t, descriptors, "scip-swift swiftpm greeter . Greeter/Greeter#greet().")
+}
+
+// TestAManifestIsAlsoASource is the registry-level half of the `Package.swift`
+// decision, and it is the case no earlier language could produce: one extension,
+// one Parser value, one `file.lang` — and the ecosystem's manifest goes through
+// the same parser as every other Swift file, because it *is* one.
+//
+// What keeps that from being a defect is where the two files' declarations land.
+// A manifest is in no module — SwiftPM compiles each one on its own — so its
+// declarations hang off a container named for the file, and two manifests in one
+// repository declaring `let package` therefore declare two symbols rather than
+// one. Giving both the root module's namespace would render one descriptor for
+// both, which the link pass joins: a phantom edge, which is worse than a missing
+// one.
+func TestAManifestIsAlsoASource(t *testing.T) {
+	c := coord.Coord{
+		Scheme: coord.SwiftScheme, Manager: coord.SwiftPMManager,
+		Name: "greeter", Version: coord.Unknown, Root: filepath.FromSlash("/repo"),
+	}
+	src := "let package = Package(name: \"greeter\")\n"
+
+	descriptorOf := func(t *testing.T, rel string) string {
+		t.Helper()
+		path := filepath.Join(filepath.FromSlash("/repo"), filepath.FromSlash(rel))
+		p, ok := extract.ParserFor(path)
+		require.True(t, ok, rel)
+		ff := p.Parse(path, []byte(src), c)
+		require.Empty(t, ff.ParseError, rel)
+		assert.Equal(t, swift.Lang, ff.File.Lang, rel)
+		for _, occ := range ff.Occurrences {
+			if occ.Name == "package" && occ.Role == "definition" {
+				return occ.Descriptor.String()
+			}
+		}
+		t.Fatalf("%s declares no `package`", rel)
+		return ""
+	}
+
+	root := descriptorOf(t, coord.PackageManifest)
+	nested := descriptorOf(t, "examples/demo/"+coord.PackageManifest)
+	assert.NotEqual(t, root, nested,
+		"two manifests declare two symbols; one descriptor for both is an edge that does not exist")
+	assert.Contains(t, root, "Package_swift#",
+		"a manifest's declarations hang off a container named for the file, not off a module")
 }
 
 // TestRegisteredParserParses is the end-to-end check on the registry: the entry
