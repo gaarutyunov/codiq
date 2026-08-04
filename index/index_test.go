@@ -58,16 +58,17 @@ func TestWalkSelectsOnlySupportedFiles(t *testing.T) {
 	// now, each time a deliberate edit here.
 	//
 	// ".hs" is the canary from here on, and it is chosen to outlast the others.
-	// Every other unsupported example below is on borrowed time: ".kt" is
-	// §14 M9+'s Kotlin task and ".class" is a build output of a language already
-	// registered, so a case resting on either will need this same edit again.
-	// Haskell is on no roadmap in SPEC.md, so a ".hs" file is unsupported for a
-	// reason that is not a scheduling accident — and it survived the C/C++
-	// stanza, which took ".h", ".hh", ".hpp" and ".hxx" in one edit and came
-	// within one letter of consuming the canary too.
+	// ".kt" was the other candidate and is now spent: §14 M9+'s Kotlin task took
+	// it, along with ".kts", which is the eighth time this edit has been made and
+	// the second time it took two extensions at once. What remains unsupported
+	// below is on borrowed time or is a build output of a language already
+	// registered (".class"). Haskell is on no roadmap in SPEC.md, so a ".hs" file
+	// is unsupported for a reason that is not a scheduling accident — and it has
+	// now survived the C/C++ stanza, which took ".h", ".hh", ".hpp" and ".hxx" in
+	// one edit and came within one letter of consuming the canary too.
 	require.Equal(t, []string{
 		".c", ".cc", ".cpp", ".cs", ".cxx", ".go", ".h", ".hh", ".hpp", ".hxx",
-		".java", ".php", ".py", ".rb", ".rs", ".ts",
+		".java", ".kt", ".kts", ".php", ".py", ".rb", ".rs", ".ts",
 	}, extract.Extensions(),
 		"the registry grew a language; revisit the unsupported files in these cases")
 
@@ -98,14 +99,16 @@ func TestWalkSelectsOnlySupportedFiles(t *testing.T) {
 				"app.o":      "\x00\x00\x00\x00",
 				"App.hs":     "main :: IO ()\n",
 				"App.kt":     "class App\n",
+				"App.kts":    "val x = 1\n",
 				"App.class":  "\x00\x00\x00\x00",
 				"Makefile":   "all:\n",
 				"noext":      "\n",
 				"go.mod.bak": goMod,
 			},
 			want: []string{
-				"App.cs", "App.java", "App.php", "app.c", "app.cpp", "app.h",
-				"app.hpp", "app.py", "app.rb", "app.rs", "app.ts", "main.go",
+				"App.cs", "App.java", "App.kt", "App.kts", "App.php", "app.c",
+				"app.cpp", "app.h", "app.hpp", "app.py", "app.rb", "app.rs",
+				"app.ts", "main.go",
 			},
 		},
 		{

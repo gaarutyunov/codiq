@@ -14,6 +14,7 @@ import (
 	"github.com/gaarutyunov/codiq/extract/cs"
 	"github.com/gaarutyunov/codiq/extract/golang"
 	"github.com/gaarutyunov/codiq/extract/java"
+	"github.com/gaarutyunov/codiq/extract/kotlin"
 	"github.com/gaarutyunov/codiq/extract/php"
 	"github.com/gaarutyunov/codiq/extract/py"
 	"github.com/gaarutyunov/codiq/extract/rb"
@@ -64,7 +65,11 @@ func TestParserFor(t *testing.T) {
 		{name: "a CMake listfile, which is a manifest and not a source", path: filepath.FromSlash("/repo/CMakeLists.txt"), want: false},
 		{name: "an object file, which is a build output", path: filepath.FromSlash("/repo/src/greeter.o"), want: false},
 		{name: "no extension", path: filepath.FromSlash("/repo/Makefile"), want: false},
-		{name: "an unregistered extension", path: filepath.FromSlash("/repo/App.kt"), want: false},
+		{name: "a Kotlin compilation unit", path: filepath.FromSlash("/repo/src/main/kotlin/app/App.kt"), want: true},
+		{name: "a Kotlin script, which is Kotlin and is read with the same grammar", path: filepath.FromSlash("/repo/build.gradle.kts"), want: true},
+		{name: "a Gradle settings file in the Groovy DSL, which is neither Kotlin nor a manifest this reads", path: filepath.FromSlash("/repo/settings.gradle"), want: false},
+		{name: "a Kotlin module file, which the toolchain stopped writing in 1.4", path: filepath.FromSlash("/repo/module.ktm"), want: false},
+		{name: "an unregistered extension", path: filepath.FromSlash("/repo/App.hs"), want: false},
 		{name: "the extension is case sensitive", path: filepath.FromSlash("/repo/main.GO"), want: false},
 		{name: "not the whole name", path: filepath.FromSlash("/repo/go"), want: false},
 	}
@@ -89,13 +94,15 @@ func TestParserFor(t *testing.T) {
 func TestExtensions(t *testing.T) {
 	want := []string{cs.Ext, golang.Ext, java.Ext, php.Ext, py.Ext, rb.Ext, rs.Ext, ts.Ext}
 	want = append(want, cc.Exts...)
+	want = append(want, kotlin.Exts...)
 	sort.Strings(want)
 	assert.Equal(t, want, extract.Extensions())
 
-	// The C/C++ stanza is the first to own more than one extension, and it owns
-	// eight — half the registry. The set is spelled out here rather than only
-	// referenced, so that adding a ninth is a deliberate edit in two places.
+	// The two stanzas that own more than one extension spell their sets out here
+	// rather than only referencing them, so that growing either is a deliberate
+	// edit in two places.
 	assert.Equal(t, []string{".c", ".cc", ".cpp", ".cxx", ".h", ".hh", ".hpp", ".hxx"}, cc.Exts)
+	assert.Equal(t, []string{".kt", ".kts"}, kotlin.Exts)
 }
 
 // TestCCParserSatisfiesParserStructurally is the ninth, and the claim it makes
@@ -151,6 +158,61 @@ func TestTheHeaderAndTheSourceShareOneParserAndOneLang(t *testing.T) {
 		p, ok := extract.ParserFor(path)
 		require.True(t, ok, rel)
 		assert.Equal(t, cc.Lang, p.Parse(path, []byte("void greet(void);\n"), c).File.Lang, rel)
+	}
+}
+
+// TestKotlinParserSatisfiesParserStructurally is the tenth, and the claim it
+// makes is the registry's rather than any one language's: ten sub-packages
+// written independently satisfy Parser, none of them imports extract, and the
+// byExt literal in extract.go is the whole of the compile-time check that they
+// do.
+func TestKotlinParserSatisfiesParserStructurally(t *testing.T) {
+	var p extract.Parser = kotlin.New()
+	assert.NotNil(t, p)
+}
+
+// TestRegisteredKotlinParserParses is TestRegisteredParserParses for Kotlin: the
+// entry for ".kt" is a working parser, and the descriptor it produces carries the
+// namespace the file *declares* — which for Kotlin is the one reading that works,
+// since the style guide tells you not to mirror the package in the directory
+// tree.
+func TestRegisteredKotlinParserParses(t *testing.T) {
+	path := filepath.FromSlash("/repo/src/main/kotlin/greeter/Greeter.kt")
+	p, ok := extract.ParserFor(path)
+	require.True(t, ok)
+
+	c := coord.Coord{
+		Scheme: coord.KotlinScheme, Manager: coord.GradleManager,
+		Name: "greeter", Version: coord.Unknown, Root: filepath.FromSlash("/repo"),
+	}
+	src := "package com.example.greeter\n\nclass Greeter {\n    fun greet(): String = \"\"\n}\n"
+	ff := p.Parse(path, []byte(src), c)
+
+	require.Empty(t, ff.ParseError)
+	assert.Equal(t, kotlin.Lang, ff.File.Lang)
+	assert.Equal(t, c, ff.File.Coord)
+
+	descriptors := make([]string, 0, len(ff.Occurrences))
+	for _, occ := range ff.Occurrences {
+		descriptors = append(descriptors, occ.Descriptor.String())
+	}
+	assert.Contains(t, descriptors, "scip-kotlin gradle greeter . com/example/greeter/Greeter#greet().")
+}
+
+// TestAScriptAndASourceShareOneParserAndOneLang is the registry-level half of the
+// `.kts` decision. Two extensions, one Parser value, one `file.lang` — a script
+// is Kotlin, and tagging it as something else would make a Gradle build's own
+// files a second language in every Kotlin repository indexed.
+func TestAScriptAndASourceShareOneParserAndOneLang(t *testing.T) {
+	c := coord.Coord{
+		Scheme: coord.KotlinScheme, Manager: coord.GradleManager,
+		Name: "greeter", Version: coord.Unknown, Root: filepath.FromSlash("/repo"),
+	}
+	for _, rel := range []string{"App.kt", "build.gradle.kts"} {
+		path := filepath.FromSlash("/repo/" + rel)
+		p, ok := extract.ParserFor(path)
+		require.True(t, ok, rel)
+		assert.Equal(t, kotlin.Lang, p.Parse(path, []byte("val x = 1\n"), c).File.Lang, rel)
 	}
 }
 
