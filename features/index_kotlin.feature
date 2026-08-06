@@ -48,7 +48,8 @@
 #     different file, and `Ecosystem.Manifest` is the one file `Resolve` stats to
 #     find the root. What it costs is the same thing CMake's choice costs C: a
 #     Kotlin repository with no `settings.gradle.kts` and no other language's
-#     manifest resolves to ErrNoManifest and does not index.
+#     manifest used to fail the run outright. Since the corpus milestone it is
+#     named `scip-kotlin gradle <corpus> .` instead and indexes.
 #
 # THE MILESTONE'S STATED TEST is the fourth scenario. Eight languages now write
 # `greeter/Greeter#greet().` byte for byte, and Kotlin is the first to join that

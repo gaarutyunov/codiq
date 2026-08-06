@@ -548,8 +548,8 @@ JOIN member mc ON mc.type_id = impl.impl_type AND mc.suffix = mi.suffix;
 -- cycle: the exclusive waiter holds nothing while it waits.
 --
 -- The key is a hash of a fixed string, in the *single-argument* advisory
--- keyspace shared with LockFilePath's per-path lock. A repository holding a file
--- whose path hashes to the same value would take the two locks against each
+-- keyspace shared with LockFile's per-(corpus, path) lock. A file whose key
+-- hashes to the same value would take the two locks against each
 -- other; the cost is that that one file's load serializes with the backstop,
 -- which is what the lock is for anyway, so the collision is harmless rather than
 -- merely improbable.
