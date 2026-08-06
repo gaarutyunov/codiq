@@ -14,7 +14,6 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/gaarutyunov/codiq/coord"
 	"github.com/gaarutyunov/codiq/extract"
 	"github.com/gaarutyunov/codiq/facts"
 	"github.com/gaarutyunov/codiq/link"
@@ -413,7 +412,7 @@ func TestRun(t *testing.T) {
 			rec := &recorder{poison: tt.poison, loadErr: tt.loadErr}
 
 			// A nil handle: nothing in this run reaches a database.
-			res, err := newLoader(rec, tt.limit).run(t.Context(), nil, root)
+			res, err := newLoader(rec, tt.limit).run(t.Context(), nil, root, "greeter")
 
 			if tt.wantErr != "" {
 				require.Error(t, err)
@@ -451,7 +450,7 @@ func TestRunSkippingOneFileLeavesTheOthersIntact(t *testing.T) {
 	root := tree(t, repo)
 	rec := &recorder{poison: map[string]string{"internal/store/store.go": "unexpected token at 40"}}
 
-	res, err := newLoader(rec, 4).run(t.Context(), nil, root)
+	res, err := newLoader(rec, 4).run(t.Context(), nil, root, "greeter")
 	require.NoError(t, err)
 	require.Len(t, res.Skipped, 1)
 	require.Equal(t, 1, rec.relinks)
@@ -509,7 +508,7 @@ func TestRunRetriesADeadlockedFile(t *testing.T) {
 			root := tree(t, repo)
 			rec := &recorder{deadlocks: map[string]int{"main.go": tt.deadlocks}}
 
-			res, err := newLoader(rec, 4).run(t.Context(), nil, root)
+			res, err := newLoader(rec, 4).run(t.Context(), nil, root, "greeter")
 
 			if tt.wantErr {
 				require.Error(t, err)
@@ -536,7 +535,7 @@ func TestRunNormalizesPathsAndKeepsNamespaces(t *testing.T) {
 	root := tree(t, repo)
 	rec := &recorder{}
 
-	res, err := newLoader(rec, 2).run(t.Context(), nil, root)
+	res, err := newLoader(rec, 2).run(t.Context(), nil, root, "greeter")
 	require.NoError(t, err)
 
 	assert.Equal(t, []string{"greeter.go", "internal/store/store.go", "main.go"}, rec.paths(),
@@ -619,7 +618,7 @@ func TestRunStampsEachFileWithItsOwnEcosystemsCoordinate(t *testing.T) {
 	root := tree(t, mixed)
 	rec := &recorder{}
 
-	res, err := newLoader(rec, 2).run(t.Context(), nil, root)
+	res, err := newLoader(rec, 2).run(t.Context(), nil, root, "greeter")
 	require.NoError(t, err)
 	require.Equal(t, []string{"greeter.ts", "greeter/greeter.go", "main.go"}, rec.paths())
 
@@ -652,11 +651,51 @@ func TestRunStampsEachFileWithItsOwnEcosystemsCoordinate(t *testing.T) {
 	assert.Equal(t, loaded["greeter.ts"].File.Coord, res.Coords.For("x.ts"))
 }
 
-func TestRunRequiresAManifest(t *testing.T) {
+// TestRunIndexesARepositoryWithNoManifest is the inverse of the assertion that
+// stood here, which required a manifest and failed the run without one.
+//
+// A repository that declares nothing now indexes under its corpus, and the
+// corpus is what its files' coordinates are named after. That is what makes a
+// Makefile-only C project, an Xcode app or a setup.py tree indexable at all
+// (coord/cmake.go, coord/swiftpm.go, coord/pyproject.go each recorded the debt).
+func TestRunIndexesARepositoryWithNoManifest(t *testing.T) {
 	root := tree(t, map[string]string{"main.go": "package main\n"})
+	rec := &recorder{}
 
-	_, err := newLoader(&recorder{}, 2).run(t.Context(), nil, root)
-	require.ErrorIs(t, err, coord.ErrNoManifest)
+	res, err := newLoader(rec, 2).run(t.Context(), nil, root, "solo")
+	require.NoError(t, err)
+
+	assert.Equal(t, "solo", res.Corpus)
+	assert.Equal(t, 1, res.Loaded)
+	assert.Equal(t, "scip-go gomod solo .", res.Coords.For("main.go").Prefix(),
+		"the corpus names the ecosystem no manifest declared")
+}
+
+// TestRunStampsEveryFileWithTheCorpus is the storage half of the same property.
+//
+// A file row's identity is (corpus, path), so every FileFacts the loader hands
+// the store has to carry the run's corpus — not just the ones whose coordinate
+// needed naming. Missing it on even one file would give that file the empty
+// corpus, which is a row no -corpus query finds and one that collides with the
+// same omission in every other repository.
+func TestRunStampsEveryFileWithTheCorpus(t *testing.T) {
+	root := tree(t, map[string]string{
+		"go.mod":          goMod,
+		"main.go":         "package main\n\nfunc main() {}\n",
+		"internal/a/a.go": "package a\n\nfunc A() {}\n",
+		"internal/b/b.go": "package b\n\nfunc B() {}\n",
+	})
+	rec := &recorder{}
+
+	res, err := newLoader(rec, 4).run(t.Context(), nil, root, "widget")
+	require.NoError(t, err)
+	require.Equal(t, 3, res.Loaded)
+
+	loaded := rec.facts()
+	require.Len(t, loaded, 3)
+	for path, ff := range loaded {
+		assert.Equal(t, "widget", ff.File.Corpus, "%s must carry the run's corpus", path)
+	}
 }
 
 func TestRunRejectsAMissingRepo(t *testing.T) {
@@ -664,7 +703,7 @@ func TestRunRejectsAMissingRepo(t *testing.T) {
 	// — the failure this is about.
 	missing := filepath.Join(tree(t, map[string]string{"go.mod": goMod}), "nope")
 
-	_, err := newLoader(&recorder{}, 2).run(t.Context(), nil, missing)
+	_, err := newLoader(&recorder{}, 2).run(t.Context(), nil, missing, "greeter")
 	require.Error(t, err)
 	assert.ErrorIs(t, err, os.ErrNotExist)
 }

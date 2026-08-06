@@ -173,7 +173,7 @@ func TestResolveStampsRubyFilesWithTheGemCoordinate(t *testing.T) {
 	require.NoError(t, os.WriteFile(filepath.Join(dir, coord.LockName),
 		[]byte("PATH\n  remote: .\n  specs:\n    codiq-corpus (0.3.0)\n"), 0o600))
 
-	set, err := coord.Resolve(dir)
+	set, err := coord.Resolve(dir, "greeter")
 	require.NoError(t, err)
 
 	ruby := set.For("lib/greeter/greeter" + coord.RubyExt)
@@ -184,22 +184,27 @@ func TestResolveStampsRubyFilesWithTheGemCoordinate(t *testing.T) {
 	assert.NotEqual(t, set.For("main"+coord.GoExt).Prefix(), ruby.Prefix())
 }
 
-// TestResolveNeedsAGemfileForARubyTree is the caveat this resolver inherits from
-// coord/nuget.go, stated so that it is a decision rather than a surprise:
-// Resolve returns ErrNoManifest when *no* registered manifest is found, so a Ruby
+// TestResolveNamesAGemfilelessRubyTreeAfterItsCorpus is the caveat this resolver
+// inherited from coord/nuget.go, restated now that it is no longer fatal: a Ruby
 // tree carrying only a `.gemspec` — glob-named, and therefore unusable as a
-// manifest — fails to index rather than indexing with an unknown coordinate.
+// manifest — used to fail to index at all. It now indexes under its corpus, and
+// what is lost is only the name the gemspec declares.
 //
 // Ruby hits that strictly less often than C# does, and the reason is worth
 // stating: `Directory.Build.props` is optional and rare, while Bundler *requires*
 // a Gemfile, so an application, a gem under development and any script directory
 // with a single dependency all have one. What is left is a gem that ships a
 // gemspec and no Gemfile, which is a real shape and is the one this cannot read.
-func TestResolveNeedsAGemfileForARubyTree(t *testing.T) {
+func TestResolveNamesAGemfilelessRubyTreeAfterItsCorpus(t *testing.T) {
 	dir := t.TempDir()
 	require.NoError(t, os.WriteFile(filepath.Join(dir, "greeter.gemspec"),
 		[]byte("Gem::Specification.new do |s|\n  s.name = \"greeter\"\nend\n"), 0o600))
 
-	_, err := coord.Resolve(dir)
-	require.ErrorIs(t, err, coord.ErrNoManifest)
+	set, err := coord.Resolve(dir, "cornflake")
+	require.NoError(t, err)
+
+	got := set.For("greeter.rb")
+	assert.Equal(t, "scip-ruby gem cornflake .", got.Prefix(),
+		"the corpus stands in for the name the gemspec declares and this resolver does not read")
+	assert.Equal(t, dir, got.Root)
 }

@@ -159,7 +159,7 @@ func TestResolveStampsRustFilesWithTheCargoCoordinate(t *testing.T) {
 	require.NoError(t, os.WriteFile(filepath.Join(dir, coord.CargoFile),
 		[]byte("[package]\nname = \"corpus\"\nversion = \"0.2.0\"\n"), 0o600))
 
-	set, err := coord.Resolve(dir)
+	set, err := coord.Resolve(dir, "greeter")
 	require.NoError(t, err)
 
 	rust := set.For("src/lib" + coord.RustExt)
@@ -181,12 +181,13 @@ func TestResolveStampsRustFilesWithoutAManifest(t *testing.T) {
 	require.NoError(t, os.WriteFile(filepath.Join(dir, coord.GoModFile),
 		[]byte("module github.com/foo/bar\n\ngo 1.25.0\n"), 0o600))
 
-	set, err := coord.Resolve(dir)
+	set, err := coord.Resolve(dir, "greeter")
 	require.NoError(t, err)
 
 	rust := set.For("src/lib" + coord.RustExt)
 	assert.Equal(t, coord.RustScheme, rust.Scheme)
 	assert.Equal(t, coord.CargoManager, rust.Manager)
-	assert.Equal(t, coord.Unknown, rust.Name)
+	assert.Equal(t, "greeter", rust.Name,
+		"the corpus names an ecosystem the repository declares no manifest for")
 	assert.Equal(t, dir, rust.Root)
 }

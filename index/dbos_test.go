@@ -105,13 +105,13 @@ func TestExtractedCarriesNoFacts(t *testing.T) {
 // regression to blob-passing would otherwise be invisible.
 func TestFactsAreNotWhatCrossesTheCheckpoint(t *testing.T) {
 	root := tree(t, repo)
-	coords, err := coord.Resolve(root)
+	coords, err := coord.Resolve(root, "greeter")
 	require.NoError(t, err)
 	l := defaultLoader()
 
 	for _, rel := range []string{"main.go", "greeter.go", "internal/store/store.go"} {
 		t.Run(rel, func(t *testing.T) {
-			ff, err := l.extract(root, filepath.Join(root, filepath.FromSlash(rel)), coords.For(rel))
+			ff, err := l.extract(root, filepath.Join(root, filepath.FromSlash(rel)), "greeter", coords.For(rel))
 			require.NoError(t, err)
 			require.NotEmpty(t, ff.Occurrences, "the fixture has to exercise the shapes")
 

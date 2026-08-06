@@ -234,18 +234,18 @@ func TestResolve(t *testing.T) {
 	nested := filepath.Join(root, "internal", "deep")
 	require.NoError(t, os.MkdirAll(nested, 0o750))
 
-	t.Run("finds the manifest above the directory", func(t *testing.T) {
-		set, err := coord.Resolve(nested)
+	t.Run("reads the manifest of the directory it is given", func(t *testing.T) {
+		set, err := coord.Resolve(root, "bar")
 		require.NoError(t, err)
 		got := set.For("x" + coord.GoExt)
 		assert.Equal(t, "github.com/foo/bar", got.Name)
-		// Root is the manifest's directory, not the directory asked about, so
-		// namespaces are relative to the module.
+		// Root is the directory asked about, which is also the manifest's, so
+		// namespaces are relative to the repository.
 		assert.Equal(t, "internal/deep/", got.Namespace(filepath.Join(nested, "x.go")))
 	})
 
 	t.Run("names the one ecosystem it found", func(t *testing.T) {
-		set, err := coord.Resolve(nested)
+		set, err := coord.Resolve(root, "bar")
 		require.NoError(t, err)
 		// A repository with a single ecosystem has exactly the coordinate it
 		// had before coordinates became per-ecosystem, and Primary is where a
@@ -254,23 +254,108 @@ func TestResolve(t *testing.T) {
 	})
 
 	t.Run("an ecosystem with no manifest is not another ecosystem's", func(t *testing.T) {
-		set, err := coord.Resolve(nested)
+		set, err := coord.Resolve(root, "bar")
 		require.NoError(t, err)
-		// There is no package.json anywhere above this tree. A .ts file in it
-		// still needs a coordinate, and the one thing it must not be given is
-		// the Go module's: that is what made a TypeScript class and a Go type
-		// render the same descriptor.
+		// There is no package.json in this tree. A .ts file in it still needs a
+		// coordinate, and the one thing it must not be given is the Go module's:
+		// that is what made a TypeScript class and a Go type render the same
+		// descriptor.
 		ts := set.For("x" + coord.TSExt)
-		assert.Equal(t, "scip-typescript npm . .", ts.Prefix())
+		assert.Equal(t, "scip-typescript npm bar .", ts.Prefix())
 		assert.NotEqual(t, set.For("x"+coord.GoExt).Prefix(), ts.Prefix())
 		assert.Equal(t, "internal/deep/", ts.Namespace(filepath.Join(nested, "x.ts")),
-			"an unknown package still separates one directory from another")
+			"a corpus-named package still separates one directory from another")
 	})
 
-	t.Run("reports no manifest", func(t *testing.T) {
-		_, err := coord.Resolve(t.TempDir())
-		require.ErrorIs(t, err, coord.ErrNoManifest)
+	t.Run("does not read a manifest above the directory", func(t *testing.T) {
+		// The subdirectory *is* the repository as far as this run is concerned,
+		// so it does not inherit the module above it. Before the repository
+		// bound this returned the Go module's coordinate with Root at the
+		// module — paths measured from the subdirectory, namespaces from the
+		// module, which is why narrowing this is a correction rather than a
+		// regression.
+		set, err := coord.Resolve(nested, "deep")
+		require.NoError(t, err)
+		assert.Equal(t, "scip-go gomod deep .", set.For("x"+coord.GoExt).Prefix())
+		assert.Equal(t, nested, set.For("x"+coord.GoExt).Root)
 	})
+
+	t.Run("a repository with no manifest at all still resolves", func(t *testing.T) {
+		dir := t.TempDir()
+		set, err := coord.Resolve(dir, "solo")
+		require.NoError(t, err)
+		assert.Equal(t, "scip-go gomod solo .", set.For("x"+coord.GoExt).Prefix())
+		assert.Equal(t, ". . solo .", set.Primary.Prefix(),
+			"a repository that declared nothing is still named, and by the one name it has")
+		assert.False(t, set.Primary.IsZero(), "a resolved run must not look like an unresolved one")
+	})
+
+	t.Run("refuses to resolve without a corpus", func(t *testing.T) {
+		_, err := coord.Resolve(root, "")
+		require.ErrorIs(t, err, coord.ErrNoCorpus)
+	})
+}
+
+// TestResolveKeepsTwoManifestlessRepositoriesApart is the defect the corpus
+// exists for, reproduced at the size it actually occurred.
+//
+// Two repositories with no manifest of their own sit under one parent that has
+// one. That is not a contrived shape: it is `projects/<repo>` under a home
+// directory holding a stray package.json, which is how twenty trees on one
+// machine came to share a single coordinate rooted at `$HOME`. Under that
+// coordinate, `src/greeter.go` in either repository rendered `src/` for a
+// namespace and the same four leading words for a prefix — so two unrelated
+// symbols produced byte-identical descriptors, and the link pass joins on the
+// descriptor and nothing else (§7).
+//
+// The test asserts the trap is present before asserting it is sprung: the two
+// files really are at the same repo-relative path under a parent that really
+// does hold a manifest. Without that, "the two coordinates differ" could pass
+// for reasons having nothing to do with the bound.
+func TestResolveKeepsTwoManifestlessRepositoriesApart(t *testing.T) {
+	parent := writeGoMod(t, "module github.com/foo/parent\n")
+	alpha := filepath.Join(parent, "alpha")
+	beta := filepath.Join(parent, "beta")
+	for _, repo := range []string{alpha, beta} {
+		require.NoError(t, os.MkdirAll(filepath.Join(repo, "src"), 0o750))
+	}
+
+	// The trap: one manifest above, none inside either, and the same
+	// repo-relative path in both.
+	require.FileExists(t, filepath.Join(parent, coord.GoModFile))
+	require.NoFileExists(t, filepath.Join(alpha, coord.GoModFile))
+	require.NoFileExists(t, filepath.Join(beta, coord.GoModFile))
+
+	setA, err := coord.Resolve(alpha, "alpha")
+	require.NoError(t, err)
+	setB, err := coord.Resolve(beta, "beta")
+	require.NoError(t, err)
+
+	a, b := setA.For("x"+coord.GoExt), setB.For("x"+coord.GoExt)
+
+	assert.NotEqual(t, a.Prefix(), b.Prefix(),
+		"two repositories under one manifest must not share a coordinate")
+	assert.Equal(t, "scip-go gomod alpha .", a.Prefix())
+	assert.Equal(t, "scip-go gomod beta .", b.Prefix())
+
+	// And neither took the parent's, which is the specific wrong answer.
+	parentSet, err := coord.Resolve(parent, "parent")
+	require.NoError(t, err)
+	parentCoord := parentSet.For("x" + coord.GoExt)
+	assert.Equal(t, "github.com/foo/parent", parentCoord.Name)
+	assert.NotEqual(t, parentCoord.Prefix(), a.Prefix())
+	assert.NotEqual(t, parentCoord.Prefix(), b.Prefix())
+
+	// The descriptors the link pass would join on, rendered in full. Same path,
+	// same directory, same symbol name, different descriptor — which is the whole
+	// property, and the one that was false before the bound.
+	same := filepath.Join("src", "greeter.go")
+	descA := a.Prefix() + " " + a.Namespace(filepath.Join(alpha, same)) + "Greeter#"
+	descB := b.Prefix() + " " + b.Namespace(filepath.Join(beta, same)) + "Greeter#"
+	assert.Equal(t, "src/", a.Namespace(filepath.Join(alpha, same)),
+		"the namespaces are identical, so the prefix is the only thing keeping them apart")
+	assert.Equal(t, "src/", b.Namespace(filepath.Join(beta, same)))
+	assert.NotEqual(t, descA, descB)
 }
 
 // TestExtensionsMatchTheParserRegistry is the check coord cannot make of itself.

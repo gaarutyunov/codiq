@@ -167,10 +167,8 @@ func TestManifestsIncludesComposerJSON(t *testing.T) {
 
 func TestResolveFindsComposerJSON(t *testing.T) {
 	root := writeComposerJSON(t, `{"name": "codiq/greeter", "version": "1.0.0"}`)
-	nested := filepath.Join(root, "src", "Greeter")
-	require.NoError(t, os.MkdirAll(nested, 0o750))
 
-	set, err := coord.Resolve(nested)
+	set, err := coord.Resolve(root, "greeter")
 	require.NoError(t, err)
 	got := set.For("x" + coord.PHPExt)
 	assert.Equal(t, coord.PHPScheme, got.Scheme)
@@ -194,7 +192,7 @@ func TestResolveGivesPHPItsOwnCoordinateBesideNPM(t *testing.T) {
 	require.NoError(t, os.WriteFile(filepath.Join(dir, coord.PackageJSONFile),
 		[]byte(`{"name": "codiq/mixed", "version": "8.0.0"}`), 0o600))
 
-	set, err := coord.Resolve(dir)
+	set, err := coord.Resolve(dir, "greeter")
 	require.NoError(t, err)
 
 	assert.Equal(t, "scip-php composer codiq/mixed 8.0.0", set.For("Greeter.php").Prefix())
@@ -219,13 +217,14 @@ func TestPHPFilesGetAPHPCoordinateWithNoComposerJSON(t *testing.T) {
 	require.NoError(t, os.WriteFile(filepath.Join(dir, coord.GoModFile),
 		[]byte("module github.com/foo/bar\n"), 0o600))
 
-	set, err := coord.Resolve(dir)
+	set, err := coord.Resolve(dir, "greeter")
 	require.NoError(t, err)
 
 	php := set.For("Greeter.php")
 	assert.Equal(t, coord.PHPScheme, php.Scheme)
 	assert.Equal(t, coord.ComposerManager, php.Manager)
-	assert.Equal(t, coord.Unknown, php.Name)
+	assert.Equal(t, "greeter", php.Name,
+		"the corpus names an ecosystem the repository declares no manifest for")
 	assert.Equal(t, coord.Unknown, php.Version)
 	assert.Equal(t, dir, php.Root, "namespacing still separates one directory from another")
 	assert.NotEqual(t, set.For("main.go").Prefix(), php.Prefix())

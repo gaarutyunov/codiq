@@ -21,12 +21,19 @@
 // file is also responsible for the third resource a run needs: the artifact
 // directory.
 //
-//	codiq [-dsn URL] [-dbos-dsn URL] [-artifact-dir DIR] [-v] [repo]
+//	codiq [-corpus NAME] [-dsn URL] [-dbos-dsn URL] [-artifact-dir DIR] [-v] [repo]
+//
+// Since the corpus milestone one database holds many repositories, so a run
+// names the one it is indexing: -corpus, defaulting to the base name of the
+// repository directory. That name is half of every file row's identity and it
+// is what the coordinate of a manifest-less ecosystem is called, so it is the
+// one flag whose value ends up in the graph rather than only in the process.
 //
 // Wiring lives here and only here (SPEC.md §12: plain Go, packages grouped by
 // what they do, wired in main). The flag package is the whole CLI surface — one
 // command with a handful of flags does not need a command framework, and the
-// spec names none.
+// spec names none. The corpus milestone adds one flag and does not change that
+// arithmetic.
 package main
 
 import (
@@ -119,12 +126,16 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) error {
 	dsn := fs.String("dsn", "", "PostgreSQL connection string (default $"+dsnEnv+")")
 	dbosDSN := fs.String("dbos-dsn", "", "DBOS checkpoint connection string (default $"+dbosDSNEnv+")")
 	artifactDir := fs.String("artifact-dir", "", "directory for map-phase fact artifacts (default $"+artifactDirEnv+", else "+defaultArtifactDir+")")
+	corpus := fs.String("corpus", "", "name this repository is indexed under (default: the repository directory's name)")
 	verbose := fs.Bool("v", false, "print the reason behind every skipped file")
 	fs.Usage = func() {
 		_, _ = fmt.Fprintf(stderr, "usage: codiq [flags] [repo]\n\n"+
 			"Index a repository into the CodiQ graph. repo defaults to the working\n"+
-			"directory and must be inside a module CodiQ can resolve a package\n"+
-			"coordinate for (go.mod).\n\nflags:\n")
+			"directory, and whatever directory is named *is* the repository: CodiQ\n"+
+			"reads the package manifests it holds (go.mod, package.json, …) and none\n"+
+			"above it. A directory that holds no manifest at all still indexes, with\n"+
+			"its corpus name standing in for the package name.\n\n"+
+			"One database holds many repositories, told apart by -corpus.\n\nflags:\n")
 		fs.PrintDefaults()
 	}
 	if err := fs.Parse(args); err != nil {
@@ -168,6 +179,25 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) error {
 		return fmt.Errorf("%s: %w", repo, err)
 	}
 
+	// Defaulted from the *resolved* path, so `codiq .` in /src/widget indexes
+	// the "widget" corpus rather than one called ".". Not the absolute path
+	// itself: that is already the workflow ID's business (index.RunIDPrefix), it
+	// differs between the host and the container indexing the same tree, and it
+	// would put the operator's home directory into every descriptor of every
+	// manifest-less repository. Not the git remote either — codiq must not need
+	// a git subprocess (index.prunedDir declines one for .gitignore), and a
+	// fixture tree has no remote to read.
+	//
+	// `filepath.Base("/")` is "/", the one path whose base is not a name. It is
+	// refused rather than sanitised: indexing the filesystem root is not a thing
+	// anyone means to do, and an invented name would hide it.
+	if *corpus == "" {
+		*corpus = filepath.Base(target)
+	}
+	if *corpus == string(filepath.Separator) || *corpus == "." || *corpus == ".." {
+		return fmt.Errorf("cannot name a corpus after %s: pass -corpus", target)
+	}
+
 	pool, err := open(ctx, *dsn)
 	if err != nil {
 		return err
@@ -197,7 +227,7 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) error {
 	}
 	defer dbos.Shutdown(dctx, shutdownTimeout)
 
-	h, resumed, err := start(dctx, target)
+	h, resumed, err := start(dctx, index.Request{Repo: target, Corpus: *corpus})
 	if err != nil {
 		return err
 	}
@@ -269,7 +299,14 @@ func durable(ctx context.Context, dsn string, stderr io.Writer) (dbos.DBOSContex
 //     durable). Recovery does not look at cancelled workflows at all, so this one
 //     has to be handed back to the runtime explicitly. It restarts from the same
 //     checkpoints; only the way it is reached differs.
-func start(dctx dbos.DBOSContext, target string) (dbos.WorkflowHandle[index.Result], bool, error) {
+//
+// Unfinished is still looked for by *path* and not by (path, corpus): a tree has
+// at most one run in flight, whatever it was called, and a resume that ignored
+// an in-flight run because this invocation spelled -corpus differently would
+// start the rival indexer the whole function exists to prevent. The corpus the
+// resumed run continues under is its own, off the resolve step's checkpoint
+// (index.site) — this invocation's flag names a new run and nothing else.
+func start(dctx dbos.DBOSContext, req index.Request) (dbos.WorkflowHandle[index.Result], bool, error) {
 	// Listed on the workflow ID rather than the recorded input; index.RunIDPrefix
 	// documents why that distinction is load-bearing. The name filter is just as
 	// load-bearing: the per-file map tasks are child workflows whose IDs DBOS
@@ -290,7 +327,7 @@ func start(dctx dbos.DBOSContext, target string) (dbos.WorkflowHandle[index.Resu
 	} {
 		found, err := dbos.ListWorkflows(dctx,
 			dbos.WithName(index.WorkflowName),
-			dbos.WithWorkflowIDPrefix(index.RunIDPrefix(target)),
+			dbos.WithWorkflowIDPrefix(index.RunIDPrefix(req.Repo)),
 			dbos.WithStatus([]dbos.WorkflowStatusType{c.status}),
 		)
 		if err != nil {
@@ -306,7 +343,7 @@ func start(dctx dbos.DBOSContext, target string) (dbos.WorkflowHandle[index.Resu
 		return h, true, nil
 	}
 
-	h, err := dbos.RunWorkflow(dctx, index.IndexRepo, target, dbos.WithWorkflowID(index.NewRunID(target)))
+	h, err := dbos.RunWorkflow(dctx, index.IndexRepo, req, dbos.WithWorkflowID(index.NewRunID(req.Repo)))
 	if err != nil {
 		return nil, false, fmt.Errorf("dbos: %w", err)
 	}
@@ -378,6 +415,10 @@ func open(ctx context.Context, dsn string) (*pgxpool.Pool, error) {
 // a parse error or the failure of the file's map task (index.Skip).
 func report(w io.Writer, repo string, res index.Result, elapsed time.Duration, verbose bool) {
 	_, _ = fmt.Fprintf(w, "codiq: %s\n", repo)
+	// From the Result and not from the flag: a resumed run keeps the corpus its
+	// first half wrote under (index.site), so printing the flag would name a
+	// corpus none of these rows are in.
+	_, _ = fmt.Fprintf(w, "  corpus      %s\n", res.Corpus)
 	_, _ = fmt.Fprintf(w, "  coordinate  %s\n", res.Coord.Prefix())
 	_, _ = fmt.Fprintf(w, "  workers     %d\n", res.Concurrency)
 	_, _ = fmt.Fprintf(w, "  files       %d\n", res.Files)

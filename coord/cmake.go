@@ -95,7 +95,7 @@ const (
 // as the reason.
 //
 // The corpus is the last-resort coordinate that answers it. Such a repository
-// now resolves to `c-cmake <corpus> .` rooted at its own directory: no version,
+// now resolves to `scip-cc cmake <corpus> .` rooted at its own directory: no version,
 // no CMake package name, but a name that is unique in the database and a Root
 // that separates one directory from another. What is still missing is only what
 // the manifest would have added — the declared package name and version — so a

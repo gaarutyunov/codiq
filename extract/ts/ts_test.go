@@ -21,7 +21,7 @@ func testCoord(t *testing.T) coord.Coord {
 	t.Helper()
 	root, err := filepath.Abs(filepath.Join("testdata", "greeter"))
 	require.NoError(t, err)
-	coords, err := coord.Resolve(root)
+	coords, err := coord.Resolve(root, "greeter")
 	require.NoError(t, err)
 	c := coords.For("x" + ts.Ext)
 	require.Equal(t, coord.TSScheme, c.Scheme, "the fixture must resolve through the npm resolver")

@@ -6,10 +6,18 @@
 # is actually deployed. sqlc understands the `-- +goose Up` / `-- +goose Down`
 # markers and folds only the Up sections into its catalog.
 #
-# Only 0001 is listed. 0002 creates the read-only SQL/PGQ property-graph view
-# (`CREATE PROPERTY GRAPH`, SPEC.md §4.5) — PostgreSQL 19 syntax that sqlc's
-# PostgreSQL 17 parser cannot read, and which the loader must never write to
-# anyway. The tables 0001 declares are the complete write surface.
+# The *tables* migrations are listed and the *graph* ones are not, in order.
+# gopgql emits a generation as consecutive single-purpose migrations — graph
+# down, tables, graph up — and the graph halves are `CREATE PROPERTY GRAPH`
+# (SPEC.md §4.5), PostgreSQL 19 syntax that sqlc's PostgreSQL 17 parser cannot
+# read and that the loader must never write to anyway. So 0002, 0003 and 0005
+# are skipped, and the tables halves — 0001 and 0004 — are the complete write
+# surface.
+#
+# They are listed in migration order and it matters: 0004 is an `ALTER TABLE`
+# against the `file` 0001 created, so sqlc's catalog only has `file.corpus` if
+# it reads them in the order goose applies them. Every future generation adds
+# its own `_tables.sql` here for the same reason.
 #
 # Regenerate with, from the repository root:
 #
@@ -24,7 +32,9 @@
 version: "2"
 sql:
   - engine: postgresql
-    schema: ../../schema/migrations/0001_core_tables.sql
+    schema:
+      - ../../schema/migrations/0001_core_tables.sql
+      - ../../schema/migrations/0004_corpus_tables.sql
     queries: query.sql
     gen:
       go:

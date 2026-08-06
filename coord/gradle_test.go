@@ -139,7 +139,7 @@ func TestResolveStampsKotlinFilesWithTheGradleCoordinate(t *testing.T) {
 	require.NoError(t, os.WriteFile(filepath.Join(dir, coord.SettingsFile),
 		[]byte("rootProject.name = \"corpus\"\n"), 0o600))
 
-	set, err := coord.Resolve(dir)
+	set, err := coord.Resolve(dir, "greeter")
 	require.NoError(t, err)
 
 	kt := set.For("src/main/kotlin/App.kt")
@@ -163,13 +163,14 @@ func TestResolveStampsMavenBuiltKotlinWithoutAManifest(t *testing.T) {
 	require.NoError(t, os.WriteFile(filepath.Join(dir, coord.POMFile),
 		[]byte(`<project><groupId>com.example</groupId><artifactId>corpus</artifactId><version>2.0.0</version></project>`), 0o600))
 
-	set, err := coord.Resolve(dir)
+	set, err := coord.Resolve(dir, "greeter")
 	require.NoError(t, err)
 
 	kt := set.For("src/main/kotlin/App.kt")
 	assert.Equal(t, coord.KotlinScheme, kt.Scheme)
 	assert.Equal(t, coord.GradleManager, kt.Manager)
-	assert.Equal(t, coord.Unknown, kt.Name)
+	assert.Equal(t, "greeter", kt.Name,
+		"the corpus names an ecosystem the repository declares no manifest for")
 	assert.Equal(t, coord.Unknown, kt.Version)
 	assert.Equal(t, dir, kt.Root, "namespaces still separate one directory from another")
 	assert.NotEqual(t, set.For("src/main/java/App"+coord.JavaExt).Prefix(), kt.Prefix())
@@ -181,7 +182,7 @@ func TestTheKotlinCoordinateResolvesFromTheFixture(t *testing.T) {
 	root, err := filepath.Abs(filepath.Join("..", "extract", "kotlin", "testdata", "greeter"))
 	require.NoError(t, err)
 
-	set, err := coord.Resolve(root)
+	set, err := coord.Resolve(root, "greeter")
 	require.NoError(t, err)
 
 	kt := set.For("src/main/kotlin/greeter/Greeter.kt")

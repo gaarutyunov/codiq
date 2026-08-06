@@ -36,6 +36,7 @@ type File struct {
 	PkgManager string
 	PkgName    string
 	PkgVersion string
+	Corpus     string
 }
 
 type Implement struct {

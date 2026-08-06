@@ -1,7 +1,7 @@
 -- +goose Up
 CREATE PROPERTY GRAPH app_graph
   VERTEX TABLES (
-    file LABEL file PROPERTIES (id, corpus, path, lang, pkg_scheme, pkg_manager, pkg_name, pkg_version),
+    file LABEL file PROPERTIES (id, path, lang, pkg_scheme, pkg_manager, pkg_name, pkg_version, corpus),
     occurrence LABEL occurrence PROPERTIES (id, file_id, descriptor, role, symbol_kind, name, range_start, range_end, scope_id),
     scope LABEL scope PROPERTIES (id, file_id, kind, range_start, range_end, parent_scope_id)
   )

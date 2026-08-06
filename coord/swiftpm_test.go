@@ -148,7 +148,7 @@ func TestResolveStampsSwiftFilesWithTheSwiftPMCoordinate(t *testing.T) {
 	require.NoError(t, os.WriteFile(filepath.Join(dir, coord.PackageManifest),
 		[]byte("let package = Package(name: \"corpus\")\n"), 0o600))
 
-	set, err := coord.Resolve(dir)
+	set, err := coord.Resolve(dir, "greeter")
 	require.NoError(t, err)
 
 	sw := set.For("Sources/Greeter/Greeter" + coord.SwiftExt)
@@ -174,13 +174,14 @@ func TestResolveStampsXcodeBuiltSwiftWithoutAManifest(t *testing.T) {
 	require.NoError(t, os.WriteFile(filepath.Join(dir, coord.GoModFile),
 		[]byte("module github.com/foo/bar\n\ngo 1.25.0\n"), 0o600))
 
-	set, err := coord.Resolve(dir)
+	set, err := coord.Resolve(dir, "greeter")
 	require.NoError(t, err)
 
 	sw := set.For("Sources/Greeter/Greeter" + coord.SwiftExt)
 	assert.Equal(t, coord.SwiftScheme, sw.Scheme)
 	assert.Equal(t, coord.SwiftPMManager, sw.Manager)
-	assert.Equal(t, coord.Unknown, sw.Name)
+	assert.Equal(t, "greeter", sw.Name,
+		"the corpus names an ecosystem the repository declares no manifest for")
 	assert.Equal(t, coord.Unknown, sw.Version)
 	assert.Equal(t, dir, sw.Root, "namespaces still separate one module from another")
 	assert.NotEqual(t, set.For("main"+coord.GoExt).Prefix(), sw.Prefix())
@@ -192,7 +193,7 @@ func TestTheSwiftCoordinateResolvesFromTheFixture(t *testing.T) {
 	root, err := filepath.Abs(filepath.Join("..", "extract", "swift", "testdata", "greeter"))
 	require.NoError(t, err)
 
-	set, err := coord.Resolve(root)
+	set, err := coord.Resolve(root, "greeter")
 	require.NoError(t, err)
 
 	sw := set.For("Sources/Greeter/Greeter" + coord.SwiftExt)

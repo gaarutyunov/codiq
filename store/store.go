@@ -127,31 +127,40 @@ func ReplaceFile(ctx context.Context, db DB, ff facts.FileFacts) error {
 	return nil
 }
 
-// resolveFile returns the file row's uuid, creating the row if this path has
-// never been loaded and refreshing its properties if it has.
+// resolveFile returns the file row's uuid, creating the row if this
+// (corpus, path) has never been loaded and refreshing its properties if it has.
 //
 // The id must survive a reload: `imports` endpoints are file ids, so minting a
 // new one would invalidate every other file's import edges into this one, and
-// `ReplaceFile` would be merely repeatable rather than idempotent. So the path
+// `ReplaceFile` would be merely repeatable rather than idempotent. So the pair
 // is the natural key and the uuid is a surrogate that is looked up, not
 // regenerated.
 //
+// The pair, and not the path. One database holds many repositories, and
+// `src/main.go` is a path most of them have — so resolving on the path alone
+// would hand one repository's file the row of another's, and the delete-then-
+// insert below would empty the first repository's file every time the second
+// was indexed. That is the storage half of the corpus; the descriptor half is
+// coord.Resolve's, and both are needed, because the link pass joins on
+// descriptors rather than on file rows.
+//
 // The advisory lock closes the select-then-insert race. It is needed because
-// `path` carries only a btree index and not a unique constraint (the SDL
+// the pair carries only btree indexes and not a unique constraint (the SDL
 // declares no unique keys, and this package does not get to change the schema),
-// so ON CONFLICT is unavailable. Keyed on the path and held to the end of the
+// so ON CONFLICT is unavailable. Keyed on the pair and held to the end of the
 // transaction, it serializes only concurrent loads of the *same* file — which is
 // the only case that can collide — and leaves M2's per-file goroutines running
-// in parallel otherwise.
+// in parallel otherwise, including across corpora.
 func resolveFile(ctx context.Context, q *sqlc.Queries, f facts.File) (uuid.UUID, error) {
-	if err := q.LockFilePath(ctx, f.Path); err != nil {
-		return uuid.Nil, fmt.Errorf("lock path: %w", err)
+	if err := q.LockFile(ctx, sqlc.LockFileParams{Corpus: f.Corpus, Path: f.Path}); err != nil {
+		return uuid.Nil, fmt.Errorf("lock file: %w", err)
 	}
 
-	fileID, err := q.FileIDByPath(ctx, f.Path)
+	fileID, err := q.FileIDByCorpusPath(ctx, sqlc.FileIDByCorpusPathParams{Corpus: f.Corpus, Path: f.Path})
 	switch {
 	case errors.Is(err, pgx.ErrNoRows):
 		fileID, err = q.InsertFile(ctx, sqlc.InsertFileParams{
+			Corpus:     f.Corpus,
 			Path:       f.Path,
 			Lang:       f.Lang,
 			PkgScheme:  f.Coord.Scheme,
@@ -164,12 +173,14 @@ func resolveFile(ctx context.Context, q *sqlc.Queries, f facts.File) (uuid.UUID,
 		}
 		return fileID, nil
 	case err != nil:
-		return uuid.Nil, fmt.Errorf("lookup path: %w", err)
+		return uuid.Nil, fmt.Errorf("lookup file: %w", err)
 	}
 
-	// The path was loaded before. Its coordinate can still have moved — a go.mod
+	// The file was loaded before. Its coordinate can still have moved — a go.mod
 	// version bump changes pkg_version for every file in the module — so the
-	// properties are refreshed even though the id is kept.
+	// properties are refreshed even though the id is kept. The corpus is not
+	// among them: it is half of what selected this row, so it cannot have
+	// changed without this being a different row.
 	if err := q.UpdateFile(ctx, sqlc.UpdateFileParams{
 		ID:         fileID,
 		Lang:       f.Lang,
