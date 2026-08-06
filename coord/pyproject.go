@@ -54,12 +54,13 @@ func init() {
 // over a missing manifest field. An absent one becomes Unknown, which can never
 // false-match (§4.3).
 //
-// A repository whose only manifest is a setup.py resolves nothing — the
-// registry is keyed by manifest filename and setup.py is not registered — so
-// such a tree reaches Resolve's ErrNoManifest unless another ecosystem's
-// manifest is present. That is the pre-existing contract and not this
-// resolver's to change; it is noted because it is the one common Python layout
-// this milestone does not reach.
+// A repository whose only manifest is a setup.py resolves nothing here — the
+// registry is keyed by manifest filename and setup.py is not registered. Since
+// the corpus milestone that is no longer fatal: such a tree resolves to
+// `scip-python pip <corpus> .` rooted at itself and indexes, with the corpus
+// standing in for the distribution name setup.py would have declared. Reading
+// setup.py properly is still out of scope, and is the one common Python layout
+// whose *declared* name this resolver does not reach.
 func FromPyProject(dir string) (Coord, error) {
 	path := filepath.Join(dir, PyProjectFile)
 	f, err := os.Open(path)

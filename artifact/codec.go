@@ -54,9 +54,10 @@ var (
 func encode(ff facts.FileFacts) (*factsv1.FileFacts, error) {
 	msg := &factsv1.FileFacts{
 		File: &factsv1.File{
-			Path:  ff.File.Path,
-			Lang:  ff.File.Lang,
-			Coord: encodeCoord(ff.File.Coord),
+			Corpus: ff.File.Corpus,
+			Path:   ff.File.Path,
+			Lang:   ff.File.Lang,
+			Coord:  encodeCoord(ff.File.Coord),
 		},
 		Scopes:      make([]*factsv1.Scope, 0, len(ff.Scopes)),
 		Occurrences: make([]*factsv1.Occurrence, 0, len(ff.Occurrences)),
@@ -133,9 +134,10 @@ func decode(msg *factsv1.FileFacts) (facts.FileFacts, error) {
 	}
 	ff := facts.FileFacts{
 		File: facts.File{
-			Path:  msg.GetFile().GetPath(),
-			Lang:  msg.GetFile().GetLang(),
-			Coord: decodeCoord(msg.GetFile().GetCoord()),
+			Corpus: msg.GetFile().GetCorpus(),
+			Path:   msg.GetFile().GetPath(),
+			Lang:   msg.GetFile().GetLang(),
+			Coord:  decodeCoord(msg.GetFile().GetCoord()),
 		},
 		ParseError: msg.GetParseError(),
 	}

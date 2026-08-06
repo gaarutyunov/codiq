@@ -133,22 +133,35 @@ services:
   # `main` calls a `Greeter` defined in the other file. So `up` yields the
   # cross-file edge the milestone is about, from a corpus small enough to read.
   #
-  # Not CodiQ's own source, which is the obvious choice and the wrong one. A
-  # corpus boundary is not modelled in M1 (schema/codiq.graphql on `file.path`:
-  # "uniqueness of a path is a property of a *corpus*, and the corpus boundary is
-  # not modelled"), so `file` rows are keyed by path alone across every corpus in
-  # the database — and deploy/seed/seed.sql's demo corpus contains
-  # `cmd/codiq/main.go`, a path this repository really has. Indexing the repo
-  # therefore *replaces* that seeded file's rows, and the demo's
-  # `cmd/codiq/main.go ──imports──▶ internal/graph/store.go` edge disappears
-  # (measured, not assumed). The fixture's module is `github.com/foo/bar` and its
-  # paths are `main.go`/`greeter.go`, so it collides with nothing.
+  # Not CodiQ's own source, and the reason has changed rather than gone away.
   #
-  # Index something else by overriding the volume: the binary takes any directory
-  # inside a module it can resolve a coordinate for.
+  # It used to be a hard collision: `file` rows were keyed by path alone across
+  # every repository in the database, and deploy/seed/seed.sql's demo rows
+  # include `cmd/codiq/main.go`, a path this repository really has. Indexing the
+  # repo *replaced* that seeded file's rows, and the demo's
+  # `cmd/codiq/main.go ──imports──▶ internal/graph/store.go` edge disappeared
+  # (measured, not assumed). That is exactly the defect `file.corpus` removes: a
+  # file is identified by `(corpus, path)`, the seed's rows sit in the corpus
+  # `codiq`, and a run under any other name cannot touch them.
+  #
+  # What is left is the ordinary rule that two runs naming the *same* corpus are
+  # two indexes of one repository, the second replacing the first. So indexing
+  # this repo as `-corpus codiq` still overwrites the seed — correctly, because
+  # that is what the name says — and indexing it under any other name does not.
+  # The fixture stays the default for a smaller reason: it is §14 M2's own
+  # acceptance corpus, and it is two files rather than a hundred.
+  #
+  # Index something else by overriding the volume, and name it. The directory
+  # given *is* the repository — its manifests are read, nothing above it is —
+  # and a directory with no manifest at all indexes too, with the corpus
+  # standing in for the package name.
   #
   #   docker compose -f deploy/docker-compose.yml run --rm \
-  #     -v "$PWD:/src:ro" codiq codiq /src
+  #     -v "$PWD:/src:ro" codiq codiq -corpus myrepo /src
+  #
+  # Without `-corpus` the name defaults to the mount point's base name, which is
+  # `src` for the line above and `repo` for the service below — a default worth
+  # overriding precisely because it describes the mount rather than the code.
   #
   # After `seed` rather than after `migrate`, even though only the schema is
   # strictly required: both services write, and the demo corpus and the indexed
@@ -188,7 +201,9 @@ services:
       # only writer and the only reader. Under Kubernetes this becomes a
       # ReadWriteMany PVC (§16) and nothing in the application changes.
       - artifacts:/artifacts
-    command: ["codiq", "/repo"]
+    # Named explicitly rather than defaulted: the default would be `repo`, after
+    # the mount point, and the demo graph should say what it indexed.
+    command: ["codiq", "-corpus", "greeter", "/repo"]
 
   # The read surface (§8): GraphQL compiled to SQL/PGQ, served over MCP. CodiQ
   # builds no MCP layer of its own. The server never writes — its pool opens

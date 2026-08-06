@@ -134,7 +134,7 @@ func TestTheCCCoordinateResolvesFromTheFixture(t *testing.T) {
 	root, err := filepath.Abs(filepath.Join("..", "extract", "cc", "testdata", "greeter"))
 	require.NoError(t, err)
 
-	set, err := coord.Resolve(root)
+	set, err := coord.Resolve(root, "greeter")
 	require.NoError(t, err)
 
 	c := set.For("src/greeter.c")
@@ -151,19 +151,30 @@ func TestTheCCCoordinateResolvesFromTheFixture(t *testing.T) {
 	}
 }
 
-// TestNoManifestAtAllIsStillAFailedRun is the cost of C having no manifest,
-// pinned rather than described.
+// TestNoManifestAtAllIndexesUnderTheCorpus is what C having no manifest costs
+// now, pinned rather than described.
 //
-// Resolve walks up looking for *any* registered manifest and fails the whole run
-// when it finds none. For eight ecosystems that is an edge case; for C it is the
-// ordinary state of a Makefile-only, autotools, Meson or Bazel project, and
-// nothing about the failure names C as the reason. coord/cmake.go says why the
-// fix belongs to Resolve rather than to an additional-language task.
-func TestNoManifestAtAllIsStillAFailedRun(t *testing.T) {
+// Resolve used to walk up looking for *any* registered manifest and fail the
+// whole run when it found none. For eight ecosystems that was an edge case; for
+// C it is the ordinary state of a Makefile-only, autotools, Meson or Bazel
+// project, and nothing about the failure named C as the reason. The corpus is
+// the last-resort coordinate coord/cmake.go said Resolve owed this case, so the
+// assertion is now its inverse.
+func TestNoManifestAtAllIndexesUnderTheCorpus(t *testing.T) {
 	dir := t.TempDir()
 	require.NoError(t, os.WriteFile(filepath.Join(dir, "Makefile"), []byte("all:\n\tcc -o hello main.c\n"), 0o600))
 	require.NoError(t, os.WriteFile(filepath.Join(dir, "main.c"), []byte("int main(void){return 0;}\n"), 0o600))
 
-	_, err := coord.Resolve(dir)
-	require.ErrorIs(t, err, coord.ErrNoManifest)
+	set, err := coord.Resolve(dir, "greeter")
+	require.NoError(t, err, "a Makefile-only C project must index")
+
+	got := set.For("main.c")
+	assert.Equal(t, "scip-cc cmake greeter .", got.Prefix(),
+		"the corpus names the package CMakeLists.txt would have named")
+	assert.Equal(t, dir, got.Root, "and the repository is its own root, so namespaces still separate directories")
+
+	// Not `. . . .`, and not another language's: those are the two failures the
+	// fallback exists to avoid, and they are different failures.
+	assert.NotEqual(t, coord.Unknown, got.Name)
+	assert.NotEqual(t, set.For("main.go").Prefix(), got.Prefix())
 }

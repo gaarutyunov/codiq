@@ -53,8 +53,10 @@
 #     that is not a gap: a SwiftPM package's version is a git tag, so the
 #     manifest format has no version field to read. What it costs is what CMake's
 #     choice costs C and Gradle's costs Kotlin: a Swift repository with no
-#     `Package.swift` and no other language's manifest resolves to ErrNoManifest
-#     and does not index. An Xcode-only project is exactly that repository.
+#     `Package.swift` and no other language's manifest used to fail the run
+#     outright. Since the corpus milestone it is named
+#     `scip-swift swiftpm <corpus> .` instead and indexes, so an Xcode-only
+#     project -- exactly that repository -- is no longer out of reach.
 #
 # THE MILESTONE'S STATED TEST is the fifth scenario. Nine languages now write
 # `greeter/Greeter#greet().` byte for byte, and Swift joins that collision the

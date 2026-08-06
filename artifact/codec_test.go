@@ -59,7 +59,7 @@ func TestExtractedFactsSurviveTheArtifact(t *testing.T) {
 	for path, content := range module {
 		require.NoError(t, os.WriteFile(filepath.Join(root, path), []byte(content), 0o644))
 	}
-	coords, err := coord.Resolve(root)
+	coords, err := coord.Resolve(root, "greeter")
 	require.NoError(t, err)
 
 	s, err := artifact.Open(t.TempDir())
@@ -109,7 +109,7 @@ func TestTheFixtureExercisesEveryShape(t *testing.T) {
 	for path, content := range module {
 		require.NoError(t, os.WriteFile(filepath.Join(root, path), []byte(content), 0o644))
 	}
-	coords, err := coord.Resolve(root)
+	coords, err := coord.Resolve(root, "greeter")
 	require.NoError(t, err)
 
 	roles := map[facts.Role]bool{}
@@ -170,7 +170,7 @@ func TestArtifactSizeAgainstTheSource(t *testing.T) {
 	for path, content := range module {
 		require.NoError(t, os.WriteFile(filepath.Join(root, path), []byte(content), 0o644))
 	}
-	coords, err := coord.Resolve(root)
+	coords, err := coord.Resolve(root, "greeter")
 	require.NoError(t, err)
 
 	s, err := artifact.Open(t.TempDir())

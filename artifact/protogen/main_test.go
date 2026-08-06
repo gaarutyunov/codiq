@@ -75,7 +75,7 @@ func TestTheSDLIsReadWholeGuardsAgainstASilentlyNarrowParser(t *testing.T) {
 		byTable[n.Table] = n
 	}
 	for table, want := range map[string][]string{
-		"file":       {"id", "path", "lang", "pkg_scheme", "pkg_manager", "pkg_name", "pkg_version"},
+		"file":       {"id", "path", "lang", "pkg_scheme", "pkg_manager", "pkg_name", "pkg_version", "corpus"},
 		"scope":      {"id", "file_id", "kind", "range_start", "range_end", "parent_scope_id"},
 		"occurrence": {"id", "file_id", "descriptor", "role", "symbol_kind", "name", "range_start", "range_end", "scope_id"},
 	} {

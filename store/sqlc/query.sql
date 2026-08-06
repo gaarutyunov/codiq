@@ -8,30 +8,56 @@
 -- ===========================================================================
 -- File identity
 --
--- `file.path` is the natural key and `file.id` is a surrogate, so the loader
--- resolves on path and *reuses* the existing id. Keeping the id stable across
--- re-indexes is what stops re-indexing one file from invalidating every other
--- file's `imports` edges (whose endpoints are file ids), and it is what makes
--- `ReplaceFile` idempotent rather than merely repeatable.
+-- `(file.corpus, file.path)` is the natural key and `file.id` is a surrogate,
+-- so the loader resolves on the pair and *reuses* the existing id. Keeping the
+-- id stable across re-indexes is what stops re-indexing one file from
+-- invalidating every other file's `imports` edges (whose endpoints are file
+-- ids), and it is what makes `ReplaceFile` idempotent rather than merely
+-- repeatable.
 --
--- There is no unique constraint on `path` (only the btree index the SDL
--- declares), so `ON CONFLICT` is unavailable and the resolve is a
+-- The corpus is in the key and not only in the row. One database holds many
+-- repositories and `src/main.go` is a path most of them have; resolving on the
+-- path alone would make two repositories' files one row, so indexing the second
+-- would delete the first's occurrences and load its own over the top. The
+-- symptom would be a repository that empties itself every time a sibling is
+-- indexed.
+--
+-- There is still no unique constraint on the pair (only the two btree indexes
+-- the SDL declares; SPEC.md §16 records why the `@key` is deliberately not
+-- taken yet), so `ON CONFLICT` is unavailable and the resolve is a
 -- select-then-insert. The advisory lock below makes that race-free without a
--- schema change: it is keyed on the path, held to the end of the enclosing
+-- schema change: it is keyed on the pair, held to the end of the enclosing
 -- transaction, and so serializes only concurrent loads of the *same* file --
 -- exactly the collision select-then-insert has -- while leaving loads of
 -- different files fully parallel (SPEC.md §14 M2 loads files on goroutines).
+--
+-- Keyed on the pair and not on the path, for a reason that is not symmetry:
+-- with a path-only key, two corpora's `src/main.go` would serialize on each
+-- other for no reason at all -- they are different rows and cannot collide --
+-- and the more repositories the database holds the more of that contention
+-- there is.
+--
+-- The two are composed by *seeding* the path's hash with the corpus's rather
+-- than by concatenating the strings. Concatenation would need a separator that
+-- cannot occur in either half, and PostgreSQL text cannot hold the one
+-- separator a path genuinely excludes (a NUL byte is rejected by the encoding),
+-- so any printable choice would be a character a path is merely unlikely to
+-- contain -- and `('a', 'b/c')` hashing to the same key as `('a/b', 'c')` is
+-- exactly the aliasing this key exists to remove. A hash collision between two
+-- genuinely different pairs is still possible and still harmless: the worst it
+-- costs is that two unrelated loads take turns, which is what a path-only key
+-- did for every pair.
 -- ===========================================================================
 
--- name: LockFilePath :exec
-SELECT pg_advisory_xact_lock(hashtextextended(@path::text, 0));
+-- name: LockFile :exec
+SELECT pg_advisory_xact_lock(hashtextextended(@path::text, hashtextextended(@corpus::text, 0)));
 
--- name: FileIDByPath :one
-SELECT id FROM file WHERE path = @path;
+-- name: FileIDByCorpusPath :one
+SELECT id FROM file WHERE corpus = @corpus AND path = @path;
 
 -- name: InsertFile :one
-INSERT INTO file (path, lang, pkg_scheme, pkg_manager, pkg_name, pkg_version)
-VALUES (@path, @lang, @pkg_scheme, @pkg_manager, @pkg_name, @pkg_version)
+INSERT INTO file (corpus, path, lang, pkg_scheme, pkg_manager, pkg_name, pkg_version)
+VALUES (@corpus, @path, @lang, @pkg_scheme, @pkg_manager, @pkg_name, @pkg_version)
 RETURNING id;
 
 -- name: UpdateFile :exec
@@ -522,8 +548,8 @@ JOIN member mc ON mc.type_id = impl.impl_type AND mc.suffix = mi.suffix;
 -- cycle: the exclusive waiter holds nothing while it waits.
 --
 -- The key is a hash of a fixed string, in the *single-argument* advisory
--- keyspace shared with LockFilePath's per-path lock. A repository holding a file
--- whose path hashes to the same value would take the two locks against each
+-- keyspace shared with LockFile's per-(corpus, path) lock. A file whose key
+-- hashes to the same value would take the two locks against each
 -- other; the cost is that that one file's load serializes with the backstop,
 -- which is what the lock is for anyway, so the collision is harmless rather than
 -- merely improbable.

@@ -78,6 +78,7 @@ message File {
   string lang = 2;
   // The pkg_* columns, as the coordinate they are.
   Coord coord = 3;
+  string corpus = 4;
 }
 
 // Scope is a row in `scope`, as the extractor produces it.

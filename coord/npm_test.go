@@ -115,10 +115,8 @@ func TestManifestsIncludesPackageJSON(t *testing.T) {
 
 func TestResolveFindsPackageJSON(t *testing.T) {
 	root := writePackageJSON(t, `{"name": "greeter", "version": "1.0.0"}`)
-	nested := filepath.Join(root, "src", "deep")
-	require.NoError(t, os.MkdirAll(nested, 0o750))
 
-	set, err := coord.Resolve(nested)
+	set, err := coord.Resolve(root, "greeter")
 	require.NoError(t, err)
 	got := set.For("x" + coord.TSExt)
 	assert.Equal(t, coord.TSScheme, got.Scheme)
@@ -152,7 +150,7 @@ func TestResolveGivesEachEcosystemItsOwnManifest(t *testing.T) {
 	require.NoError(t, os.WriteFile(filepath.Join(dir, coord.PackageJSONFile),
 		[]byte(`{"name": "@codiq/mixed", "version": "2.0.0"}`), 0o600))
 
-	set, err := coord.Resolve(dir)
+	set, err := coord.Resolve(dir, "greeter")
 	require.NoError(t, err)
 
 	assert.Equal(t, "scip-go gomod github.com/foo/bar .", set.For("greeter.go").Prefix())

@@ -133,10 +133,8 @@ func TestManifestsIncludesPyProject(t *testing.T) {
 
 func TestResolveFindsPyProject(t *testing.T) {
 	root := writePyProject(t, "[project]\nname = \"greeter\"\nversion = \"1.0.0\"\n")
-	nested := filepath.Join(root, "pkg", "sub")
-	require.NoError(t, os.MkdirAll(nested, 0o750))
 
-	set, err := coord.Resolve(nested)
+	set, err := coord.Resolve(root, "greeter")
 	require.NoError(t, err)
 	got := set.For("x" + coord.PyExt)
 	assert.Equal(t, "scip-python pip greeter 1.0.0", got.Prefix())
@@ -160,7 +158,7 @@ func TestResolveKeepsThreeEcosystemsApart(t *testing.T) {
 	require.NoError(t, os.WriteFile(filepath.Join(dir, coord.PyProjectFile),
 		[]byte("[project]\nname = \"codiq-mixed\"\nversion = \"3.0.0\"\n"), 0o600))
 
-	set, err := coord.Resolve(dir)
+	set, err := coord.Resolve(dir, "greeter")
 	require.NoError(t, err)
 
 	assert.Equal(t, "scip-go gomod github.com/foo/bar .", set.For("greeter.go").Prefix())
@@ -184,15 +182,21 @@ func TestResolveKeepsThreeEcosystemsApart(t *testing.T) {
 }
 
 // A repository with no pyproject.toml still has to give its .py files a
-// coordinate, and the one thing it must not give them is another language's.
-func TestResolveGivesPythonItsOwnUnknown(t *testing.T) {
+// coordinate, and there are two things it must not give them: another language's,
+// and a name that every other manifest-less repository also has.
+func TestResolveNamesPythonAfterTheCorpus(t *testing.T) {
 	root := writeGoMod(t, "module github.com/foo/bar\n")
 
-	set, err := coord.Resolve(root)
+	set, err := coord.Resolve(root, "greeter")
 	require.NoError(t, err)
 
 	py := set.For("x" + coord.PyExt)
-	assert.Equal(t, "scip-python pip . .", py.Prefix())
+	assert.Equal(t, "scip-python pip greeter .", py.Prefix())
 	assert.NotEqual(t, set.For("x"+coord.GoExt).Prefix(), py.Prefix())
-	assert.Equal(t, root, py.Root, "an unknown package still separates one directory from another")
+	assert.Equal(t, root, py.Root, "a corpus-named package still separates one directory from another")
+
+	// The version stays Unknown and the name does not, which is the whole of
+	// what the corpus changed about this coordinate: a version genuinely cannot
+	// be determined here, and a name now always can.
+	assert.Equal(t, coord.Unknown, py.Version)
 }

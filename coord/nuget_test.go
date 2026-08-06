@@ -193,7 +193,7 @@ func TestResolveStampsCSharpFilesWithTheNuGetCoordinate(t *testing.T) {
 	require.NoError(t, os.WriteFile(filepath.Join(dir, coord.PropsFile),
 		[]byte(`<Project><PropertyGroup><PackageId>Codiq.Corpus</PackageId><Version>0.2.0</Version></PropertyGroup></Project>`), 0o600))
 
-	set, err := coord.Resolve(dir)
+	set, err := coord.Resolve(dir, "greeter")
 	require.NoError(t, err)
 
 	csharp := set.For("src/App/Program" + coord.CSharpExt)
@@ -222,13 +222,14 @@ func TestResolveStampsAPropslessProjectWithoutAManifest(t *testing.T) {
 	require.NoError(t, os.WriteFile(filepath.Join(dir, coord.GoModFile),
 		[]byte("module github.com/foo/bar\n\ngo 1.25.0\n"), 0o600))
 
-	set, err := coord.Resolve(dir)
+	set, err := coord.Resolve(dir, "greeter")
 	require.NoError(t, err)
 
 	csharp := set.For("src/App/Program" + coord.CSharpExt)
 	assert.Equal(t, coord.CSharpScheme, csharp.Scheme)
 	assert.Equal(t, coord.NuGetManager, csharp.Manager)
-	assert.Equal(t, coord.Unknown, csharp.Name)
+	assert.Equal(t, "greeter", csharp.Name,
+		"the corpus names an ecosystem the repository declares no manifest for")
 	assert.Equal(t, coord.Unknown, csharp.Version)
 	assert.Equal(t, dir, csharp.Root)
 	assert.NotEqual(t, set.For("main"+coord.GoExt).Prefix(), csharp.Prefix())

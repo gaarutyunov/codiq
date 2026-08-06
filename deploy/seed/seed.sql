@@ -72,13 +72,19 @@ DELETE FROM file              WHERE id IN (SELECT id FROM seeded_file);
 --
 -- All three share one package coordinate, because they are one Go package in
 -- one module — the coordinate comes from go.mod, not from the file (§4.3).
+--
+-- And one corpus, for the same reason at one level up: they are three files of
+-- one repository, and `(corpus, path)` is what identifies a file row. The seed
+-- names it `codiq` because that is what `codiq -corpus` would default to for
+-- this tree, so a graph seeded by hand and a graph indexed by the loader agree
+-- on where these rows live.
 -- ---------------------------------------------------------------------------
-INSERT INTO file (id, path, lang, pkg_scheme, pkg_manager, pkg_name, pkg_version) VALUES
-  ('00000000-0000-4000-8000-000000000f01', 'internal/graph/iface.go', 'go',
+INSERT INTO file (id, corpus, path, lang, pkg_scheme, pkg_manager, pkg_name, pkg_version) VALUES
+  ('00000000-0000-4000-8000-000000000f01', 'codiq', 'internal/graph/iface.go', 'go',
    'scip-go', 'gomod', 'github.com/gaarutyunov/codiq', 'v0.1.0'),
-  ('00000000-0000-4000-8000-000000000f02', 'internal/graph/store.go', 'go',
+  ('00000000-0000-4000-8000-000000000f02', 'codiq', 'internal/graph/store.go', 'go',
    'scip-go', 'gomod', 'github.com/gaarutyunov/codiq', 'v0.1.0'),
-  ('00000000-0000-4000-8000-000000000f03', 'cmd/codiq/main.go', 'go',
+  ('00000000-0000-4000-8000-000000000f03', 'codiq', 'cmd/codiq/main.go', 'go',
    'scip-go', 'gomod', 'github.com/gaarutyunov/codiq', 'v0.1.0');
 
 

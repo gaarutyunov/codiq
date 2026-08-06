@@ -208,7 +208,7 @@ func TestResolveStampsJavaFilesWithTheMavenCoordinate(t *testing.T) {
 	require.NoError(t, os.WriteFile(filepath.Join(dir, coord.POMFile),
 		[]byte(`<project><groupId>com.example</groupId><artifactId>corpus</artifactId><version>0.2.0</version></project>`), 0o600))
 
-	set, err := coord.Resolve(dir)
+	set, err := coord.Resolve(dir, "greeter")
 	require.NoError(t, err)
 
 	java := set.For("src/main/java/App" + coord.JavaExt)
@@ -234,13 +234,14 @@ func TestResolveStampsGradleProjectsWithoutAManifest(t *testing.T) {
 	require.NoError(t, os.WriteFile(filepath.Join(dir, coord.GoModFile),
 		[]byte("module github.com/foo/bar\n\ngo 1.25.0\n"), 0o600))
 
-	set, err := coord.Resolve(dir)
+	set, err := coord.Resolve(dir, "greeter")
 	require.NoError(t, err)
 
 	java := set.For("src/main/java/App" + coord.JavaExt)
 	assert.Equal(t, coord.JavaScheme, java.Scheme)
 	assert.Equal(t, coord.MavenManager, java.Manager)
-	assert.Equal(t, coord.Unknown, java.Name)
+	assert.Equal(t, "greeter", java.Name,
+		"the corpus names an ecosystem the repository declares no manifest for")
 	assert.Equal(t, coord.Unknown, java.Version)
 	assert.Equal(t, dir, java.Root)
 	assert.NotEqual(t, set.For("main"+coord.GoExt).Prefix(), java.Prefix())
