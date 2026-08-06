@@ -58,12 +58,23 @@ Feature: One database holds many repositories
 
   # 1.20 — the coordinate half, stated on its own so a failure says which half
   # broke. A repository with no manifest, under a directory that has one.
+  #
+  # The last two steps are a pair, and the second exists because the first was
+  # once written too strongly. "No descriptor in alpha appears in beta" fails,
+  # correctly, on three rows: both repositories import `fmt`, and an import that
+  # leaves the module becomes a *foreign* coordinate — a function of the imported
+  # path alone, identical in every repository in the database. That sharing is
+  # the point rather than a leak: it is the only thing that could ever answer
+  # "who else uses this dependency", which is a question one database holding
+  # many repositories exists to make askable. What must never be shared is a
+  # descriptor a corpus *defines*.
   Scenario: A repository with no manifest is named after its corpus
     Given two repositories that share a path, a directory and a symbol name
     When both are indexed under their own corpus
     Then every file in "alpha" carries the package name "alpha"
     And every file in "beta" carries the package name "beta"
-    And no descriptor in "alpha" appears in "beta"
+    And no descriptor "alpha" defines appears in "beta"
+    And both corpora carry the shared foreign descriptor "scip-go gomod fmt . Println()."
 
   # 1.21 — the property that makes a shared database usable rather than merely
   # correct: indexing one repository is not an event in another's life.

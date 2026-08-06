@@ -162,7 +162,8 @@ func InitializeCorpusScenario(sc *godog.ScenarioContext) {
 	sc.Step(`^each corpus has its own occurrences of "([^"]*)"$`, st.eachCorpusOwnsItsOccurrences)
 	sc.Step(`^no derived edge joins two corpora$`, st.noCrossCorpusEdges)
 	sc.Step(`^every file in "([^"]*)" carries the package name "([^"]*)"$`, st.corpusNamesThePackage)
-	sc.Step(`^no descriptor in "([^"]*)" appears in "([^"]*)"$`, st.noSharedDescriptors)
+	sc.Step(`^no descriptor "([^"]*)" defines appears in "([^"]*)"$`, st.noSharedDefinitionDescriptors)
+	sc.Step(`^both corpora carry the shared foreign descriptor "([^"]*)"$`, st.foreignDescriptorsAreShared)
 	sc.Step(`^"([^"]*)" is exactly what it was before$`, st.corpusUnchanged)
 	sc.Step(`^every file in "([^"]*)" kept the identity it was first given$`, st.corpusKeptIdentity)
 
@@ -488,32 +489,78 @@ func (st *corpusState) corpusNamesThePackage(ctx context.Context, corpus, want s
 	})
 }
 
-// noSharedDescriptors is the property one level below noCrossCorpusEdges, and
-// the reason that one holds.
+// noSharedDefinitionDescriptors is the property one level below
+// noCrossCorpusEdges, and the reason that one holds.
 //
 // An edge between two corpora can only exist if a descriptor does, because the
 // link pass has nothing else to join on. Asserting the intersection is empty
 // says *why* there are no edges rather than only that there are none — so a
 // future change that reintroduced the collision but happened to produce no
 // matching reference would still fail here.
-func (st *corpusState) noSharedDescriptors(ctx context.Context, first, second string) error {
-	var shared, each int
+//
+// **Definitions and not all descriptors, and the difference is a feature rather
+// than a loosening.** This step was first written as "no descriptor in one
+// corpus appears in the other" and it failed, correctly, on three rows: both
+// repositories import `fmt`, and an import that leaves the module becomes a
+// *foreign* coordinate (`coord.Foreign`), which is a function of the imported
+// path alone. Every repository in the database that calls `fmt.Println` renders
+// `scip-go gomod fmt . Println().` — deliberately, because that shared string is
+// the only thing that could ever answer "who else uses this dependency", which
+// is a question one database holding many repositories exists to make askable.
+// Isolating foreign descriptors would isolate the corpora from a shared world
+// they genuinely share.
+//
+// What must never be shared is a descriptor a corpus *defines*. A definition is
+// owned by exactly one repository, and two repositories claiming to define the
+// same symbol is precisely the collision this milestone removes — so the
+// intersection taken here is alpha's definitions against everything beta
+// carries, definitions and references alike, since a beta reference matching an
+// alpha definition is exactly the `resolves_to` edge that must not exist.
+func (st *corpusState) noSharedDefinitionDescriptors(ctx context.Context, first, second string) error {
+	var shared, defined int
 	err := pool.QueryRow(ctx, `
-		WITH a AS (
+		WITH defs AS (
 			SELECT DISTINCT o.descriptor FROM occurrence o
-			JOIN file f ON f.id = o.file_id WHERE f.corpus = $1
-		), b AS (
+			JOIN file f ON f.id = o.file_id
+			WHERE f.corpus = $1 AND o.role = 'definition'
+		), other AS (
 			SELECT DISTINCT o.descriptor FROM occurrence o
 			JOIN file f ON f.id = o.file_id WHERE f.corpus = $2
 		)
-		SELECT (SELECT count(*) FROM a JOIN b USING (descriptor)), (SELECT count(*) FROM a)`,
-		first, second).Scan(&shared, &each)
+		SELECT (SELECT count(*) FROM defs JOIN other USING (descriptor)), (SELECT count(*) FROM defs)`,
+		first, second).Scan(&shared, &defined)
 	if err != nil {
-		return fmt.Errorf("intersect descriptors of %s and %s: %w", first, second, err)
+		return fmt.Errorf("intersect %s's definitions with %s: %w", first, second, err)
 	}
 	return check(func(t assert.TestingT) {
-		assert.Positive(t, each, "descriptors in %s to compare", first)
-		assert.Zerof(t, shared, "descriptors present in both %s and %s", first, second)
+		assert.Positive(t, defined, "definitions in %s to compare", first)
+		assert.Zerof(t, shared, "descriptors %s defines that also appear in %s", first, second)
+	})
+}
+
+// foreignDescriptorsAreShared is noSharedDefinitionDescriptors' other half,
+// asserted rather than left implicit.
+//
+// Without it the suite would read as though corpus isolation were total, and the
+// next person to tighten the step above would have nothing telling them why they
+// should not. The shared foreign descriptor is the cross-repository join, and it
+// is the capability D2 chose one database for.
+func (st *corpusState) foreignDescriptorsAreShared(ctx context.Context, descriptor string) error {
+	corpora := map[string]int{}
+	for _, corpus := range []string{"alpha", "beta"} {
+		var n int
+		err := pool.QueryRow(ctx, `
+			SELECT count(*) FROM occurrence o
+			JOIN file f ON f.id = o.file_id
+			WHERE f.corpus = $1 AND o.descriptor = $2`, corpus, descriptor).Scan(&n)
+		if err != nil {
+			return fmt.Errorf("count %q in %s: %w", descriptor, corpus, err)
+		}
+		corpora[corpus] = n
+	}
+	return check(func(t assert.TestingT) {
+		assert.Positivef(t, corpora["alpha"], "occurrences of %q in alpha", descriptor)
+		assert.Positivef(t, corpora["beta"], "occurrences of %q in beta", descriptor)
 	})
 }
 
