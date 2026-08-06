@@ -82,24 +82,30 @@ const (
 // link pass joins on (§4.3) and defaulting one would make every unversioned C
 // repository in an index collide with every other.
 //
-// # What this costs, stated loudly
+// # What this used to cost, and what it costs now
 //
-// `Resolve` walks up from a directory looking for *any* registered manifest and
-// returns ErrNoManifest when it reaches the filesystem root having found none —
-// and ErrNoManifest fails the whole run, so the repository does not index at
-// all. For the eight ecosystems before this one that is an edge case: a Go tree
-// has a go.mod, a Rust tree has a Cargo.toml, and a tree with neither is not
-// really a project of that language. For C it is **the ordinary case**. A
-// Makefile-only project, an autotools project, a Meson project, a Bazel
-// project, or a bare directory of `.c` files has no registered manifest; if the
-// repository also holds no *other* language's manifest, it is unindexable, and
-// nothing about that failure names C as the reason.
+// `Resolve` used to walk up from a directory looking for *any* registered
+// manifest and fail the whole run when it reached the filesystem root having
+// found none, so the repository did not index at all. For the eight ecosystems
+// before this one that was an edge case: a Go tree has a go.mod, a Rust tree
+// has a Cargo.toml, and a tree with neither is not really a project of that
+// language. For C it was **the ordinary case**. A Makefile-only project, an
+// autotools project, a Meson project, a Bazel project, or a bare directory of
+// `.c` files has no registered manifest, and nothing about that failure named C
+// as the reason.
 //
-// That is coord's boundary and not this file's: the fix is a last-resort
-// coordinate in `Resolve` for a walk that reaches the root, which is a change to
-// the shared resolver that §14 M9+ says an additional-language task must not
-// make. It is recorded here so the next reader finds it stated rather than
-// discovers it as a bug.
+// The corpus is the last-resort coordinate that answers it. Such a repository
+// now resolves to `c-cmake <corpus> .` rooted at its own directory: no version,
+// no CMake package name, but a name that is unique in the database and a Root
+// that separates one directory from another. What is still missing is only what
+// the manifest would have added — the declared package name and version — so a
+// Makefile-only C project indexes, and its symbols simply carry the corpus for
+// a package name.
+//
+// That was coord's boundary and not this file's, which is why the fix landed in
+// the shared `Resolve` rather than here — a change §14 M9+ says an
+// additional-language task must not make, and one made deliberately by the
+// corpus milestone instead.
 const CMakeFile = "CMakeLists.txt"
 
 // CCExts are the file extensions this ecosystem owns, and it owns eight of them

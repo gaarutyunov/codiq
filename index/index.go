@@ -78,6 +78,16 @@ type Skip struct {
 // Result is what a run did. It is returned even when the run fails, so a caller
 // can report the files that were already loaded.
 type Result struct {
+	// Corpus is the name this run indexed the repository under: half of every
+	// file row's identity, and the name of every coordinate the repository
+	// declared no manifest for.
+	//
+	// It is on the Result rather than left to the caller's flag because the
+	// checkpoint and the report have to agree. A resumed run takes its corpus
+	// from the resolve step's checkpoint, not from the flag the resuming process
+	// happened to be given (dbos.go's site), so the report has to name the one
+	// the rows were actually written under.
+	Corpus string
 	// Coord is the repository's primary package coordinate: the one a report
 	// names when it has room for exactly one (coord.Set.Primary). A repository
 	// with a single ecosystem — a Go module, an npm package — has precisely the
@@ -118,7 +128,15 @@ type Result struct {
 // its connection pool to match.
 func DefaultConcurrency() int { return max(runtime.GOMAXPROCS(0), 1) }
 
-// Run indexes the repository rooted at repo (SPEC.md §14 M2).
+// Run indexes the repository rooted at repo, into the corpus named corpus
+// (SPEC.md §14 M2).
+//
+// The corpus is the name this repository is known by in a database that holds
+// several. It is half of file identity — `(corpus, path)`, not path — and it is
+// what names the coordinate of an ecosystem the repository declares no manifest
+// for, so it reaches the descriptor and not only the file row (coord.Resolve).
+// Without it two repositories' `src/main.go` would be one row, and their
+// same-named symbols one descriptor.
 //
 // It is idempotent: store.ReplaceFile replaces a file's rows rather than merging
 // them and keeps the file's id, and link.RebuildAll recomputes the derived
@@ -128,8 +146,8 @@ func DefaultConcurrency() int { return max(runtime.GOMAXPROCS(0), 1) }
 // An unparseable file is skipped and reported in Result.Skipped; any other
 // failure aborts the run, and the link pass does not run. That asymmetry is the
 // point: a bad file is data, and a failed insert is not.
-func Run(ctx context.Context, db DB, repo string) (Result, error) {
-	return defaultLoader().run(ctx, db, repo)
+func Run(ctx context.Context, db DB, repo, corpus string) (Result, error) {
+	return defaultLoader().run(ctx, db, repo, corpus)
 }
 
 // defaultLoader is the real thing: the real extractor registry, the real store,
@@ -157,7 +175,7 @@ type loader struct {
 	limit     int
 }
 
-func (l loader) run(ctx context.Context, db DB, repo string) (Result, error) {
+func (l loader) run(ctx context.Context, db DB, repo, corpus string) (Result, error) {
 	// Absolute throughout. coord.Resolve resolves its argument, and
 	// coord.Coord.Namespace resolves a file path against the coordinate's root,
 	// so the walk has to produce paths in the same form the coordinate was
@@ -173,7 +191,11 @@ func (l loader) run(ctx context.Context, db DB, repo string) (Result, error) {
 	// is a property of (repository, ecosystem), so a repository holding a go.mod
 	// beside a package.json resolves two and every file is stamped with its own
 	// language's (coord.Set).
-	coords, err := coord.Resolve(root)
+	//
+	// root is also the repository bound: coord.Resolve reads this directory's
+	// manifests and no ancestor's, so the coordinate cannot be inherited from a
+	// tree outside the corpus.
+	coords, err := coord.Resolve(root, corpus)
 	if err != nil {
 		return Result{}, fmt.Errorf("index: %w", err)
 	}
@@ -183,7 +205,7 @@ func (l loader) run(ctx context.Context, db DB, repo string) (Result, error) {
 		return Result{}, fmt.Errorf("index: walk %s: %w", repo, err)
 	}
 
-	res := Result{Coord: coords.Primary, Coords: coords, Files: len(paths), Concurrency: l.limit}
+	res := Result{Corpus: corpus, Coord: coords.Primary, Coords: coords, Files: len(paths), Concurrency: l.limit}
 
 	// WithContext so the first real failure cancels the workers still running
 	// instead of letting them finish writing into a load that is already lost.
@@ -193,7 +215,7 @@ func (l loader) run(ctx context.Context, db DB, repo string) (Result, error) {
 	var mu sync.Mutex // guards res.Loaded and res.Skipped
 	for _, path := range paths {
 		g.Go(func() error {
-			ff, err := l.extract(root, path, coords.For(path))
+			ff, err := l.extract(root, path, corpus, coords.For(path))
 			if err != nil {
 				return err
 			}
@@ -313,7 +335,11 @@ func serializationFailure(err error) bool {
 // repo-relative, because that is what the `file` table holds (facts.File). This
 // package is the only one that knows both forms, so it is the only one that can
 // do the translation.
-func (l loader) extract(root, path string, c coord.Coord) (facts.FileFacts, error) {
+//
+// The corpus is stamped here for the same reason: it is a property of the run
+// and not of the file's bytes, so an extractor must not have to know it. It
+// travels with the path because the two together are the file's identity.
+func (l loader) extract(root, path, corpus string, c coord.Coord) (facts.FileFacts, error) {
 	parser, ok := l.parserFor(path)
 	if !ok {
 		// Unreachable: walk selects on the same registry. Reported rather than
@@ -334,6 +360,7 @@ func (l loader) extract(root, path string, c coord.Coord) (facts.FileFacts, erro
 	}
 	ff := parser.Parse(path, src, c)
 	ff.File.Path = relative(root, path)
+	ff.File.Corpus = corpus
 	return ff, nil
 }
 

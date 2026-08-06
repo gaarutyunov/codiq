@@ -20,6 +20,20 @@
 // returns a Set: one coordinate per ecosystem, keyed by the file extensions
 // that ecosystem owns.
 //
+// The same defect has a second, larger form, and it is the one the corpus
+// exists for: a *repository* bound. Resolve used to walk upward until it found
+// a manifest, with nothing to stop it at the repository. A tree with no
+// manifest of its own therefore inherited whichever one happened to sit above
+// it on that machine — measured, twenty repositories under one directory took
+// a single package.json in the operator's home directory, with Root set there,
+// so Namespace rendered every file's directory relative to *home* and two
+// same-named symbols in two unrelated repositories produced byte-identical
+// descriptors. One database holding many repositories would have linked them
+// together. So the directory Resolve is given *is* the repository: it reads
+// that directory's manifests and no ancestor's, and an ecosystem that declares
+// none there is named after the corpus instead of after somebody else's
+// package.
+//
 // One Ecosystem per language; go.mod was the only one M2 shipped (gomod.go).
 // M6 adds npm.go beside it and M7 pyproject.go, each registering itself here.
 package coord
@@ -37,11 +51,23 @@ import (
 // determined. Writing it is deliberate: a coordinate with an unknown version
 // still names a package, and `.` can never collide with a real component, so
 // the link pass (§7) will not false-match on it.
+//
+// It means that for a *version* and no longer for a *name*, and the two used to
+// be the same value for the same reason. A version legitimately cannot be
+// determined: a go.mod names a module and not its own release. A name always
+// can be, because the corpus names it — so an ecosystem with no manifest is
+// stamped `<scheme> <manager> <corpus> .` and never `. . . .`. A name of `.`
+// would put every manifest-less repository in one namespace, which is the
+// collision Resolve's repository bound exists to stop.
 const Unknown = "."
 
-// ErrNoManifest is returned when no registered manifest is found at or above a
-// directory.
-var ErrNoManifest = errors.New("coord: no package manifest found")
+// ErrNoCorpus is returned when Resolve is called without a corpus name.
+//
+// It is a caller error rather than a repository one. The corpus is what names
+// an ecosystem that declares no manifest, so resolving without it would hand
+// back the `. . . .` coordinate the bound exists to prevent — silently, and one
+// whole repository at a time.
+var ErrNoCorpus = errors.New("coord: no corpus name")
 
 // Coord is a package coordinate — the descriptor prefix of every symbol the
 // package owns, plus the directory it was resolved from.
@@ -147,7 +173,7 @@ type Ecosystem struct {
 	// They are stated here as well as produced by From because they are what an
 	// ecosystem with *no* manifest is stamped with: a .ts file in a repository
 	// that has a go.mod and no package.json still needs a coordinate, and the
-	// one thing it must not be given is another language's (unknown).
+	// one thing it must not be given is another language's (named).
 	Scheme, Manager string
 	// Exts are the file extensions this ecosystem owns, leading dot included.
 	Exts []string
@@ -155,17 +181,26 @@ type Ecosystem struct {
 	From Resolver
 }
 
-// unknown is this ecosystem's coordinate in a repository that declares no
-// manifest for it: the right scheme and manager, no name and no version, and
-// the directory the repository's other manifests were read from, so that
-// namespaces still separate one directory from another.
+// named is this ecosystem's coordinate in a repository that declares no
+// manifest for it: the right scheme and manager, the corpus for a name, no
+// version, and the repository root, so that namespaces still separate one
+// directory from another.
 //
-// Deliberately not the zero Coord. A zero coordinate renders `. . . .` and
-// carries no Root, so Namespace returns "" for every file and two same-named
-// symbols in different directories would render the same descriptor — the same
-// false match Set exists to prevent, reintroduced one level down.
-func (e Ecosystem) unknown(root string) Coord {
-	return Coord{Scheme: e.Scheme, Manager: e.Manager, Name: Unknown, Version: Unknown, Root: root}
+// It is no manifest, not no name. Before the corpus this returned Unknown for
+// the name, on the reasoning that a package nobody declared has none — but a
+// name is a thing that can always be determined once a repository has one, and
+// `. ` for a name means every manifest-less repository in the database shares a
+// namespace. Two of them holding `src/main.go` would then render byte-identical
+// descriptors for two unrelated symbols, and the link pass joins on the
+// descriptor and nothing else (§7). So the caller's corpus name is what fills
+// the slot, and Unknown keeps only the version it was always right for.
+//
+// Deliberately not the zero Coord, for the reason it never was: a zero
+// coordinate carries no Root, so Namespace returns "" for every file and two
+// same-named symbols in different directories of one repository would collide —
+// the same false match Set exists to prevent, one level down.
+func (e Ecosystem) named(root, corpus string) Coord {
+	return Coord{Scheme: e.Scheme, Manager: e.Manager, Name: corpus, Version: Unknown, Root: root}
 }
 
 // ecosystems maps a manifest filename to the ecosystem that reads it; owner
@@ -247,74 +282,99 @@ type Set struct {
 // by path's extension and by nothing else about it.
 func (s Set) For(path string) Coord { return s.ByExt[filepath.Ext(path)] }
 
-// Resolve finds the nearest directory at or above dir that holds any registered
-// manifest and returns one coordinate per ecosystem. It is the entry point the
-// batch calls once per repository.
+// Resolve reads the manifests dir declares and returns one coordinate per
+// ecosystem, all rooted at dir. It is the entry point the batch calls once per
+// repository, and corpus is the name that repository is known by in the graph.
+//
+// **The directory you index is the repository, and Resolve does not look above
+// it.** That bound is the whole of what makes one database able to hold many
+// repositories. Without it Resolve walked upward until something matched, so a
+// tree with no manifest of its own silently took the coordinate of whatever sat
+// above it — in the measured case a package.json in the operator's home
+// directory, shared by twenty unrelated repositories, with Root set there so
+// that every namespace was rendered relative to home. Two of those repositories
+// would then render byte-identical descriptors for two unrelated symbols, and
+// §7 links on the descriptor and nothing else.
+//
+// The bound is dir itself rather than a separate argument because there is no
+// second candidate for it: both callers already hand this function the
+// repository root they were told to index, and CodiQ declines to shell out to
+// git (see index.prunedDir on .gitignore), so it has no other way to know where
+// a repository ends.
+//
+// **This narrows one usage, and the narrowing is the point.** `codiq ./subdir`
+// inside a module no longer inherits that module's coordinate; it gets a
+// corpus-named one, because as far as this run is concerned the subdirectory is
+// the repository. That usage never produced a coherent graph anyway — file.path
+// was already relative to the indexed subdirectory while Root was the module
+// root, so paths and namespaces were measured from different origins. Index the
+// module and the coordinate is exactly what it always was.
 //
 // Every manifest is read from that one directory rather than each being
 // searched for on its own. Searching per ecosystem would let a package.json
 // three levels above a Go module become that module's TypeScript coordinate,
 // and would let a malformed manifest outside the repository fail a run that has
-// no file of that language at all — so the rule is the one a repository root
-// already implies, and it is exactly the rule a single-ecosystem repository has
-// always had.
+// no file of that language at all.
 //
-// An ecosystem with no manifest in that directory is not an error: it gets
-// Ecosystem.unknown, so its files are stamped with their own scheme and manager
-// and can never collide with another language's. No manifest at all is
-// ErrNoManifest, as it always was.
-func Resolve(dir string) (Set, error) {
-	abs, err := filepath.Abs(dir)
+// An ecosystem with no manifest there is not an error and never was: it gets
+// Ecosystem.named, so its files are stamped with their own scheme and manager
+// and can never collide with another language's. *No* manifest at all is not an
+// error either, which is the change — it is an ordinary repository whose every
+// ecosystem is named by the corpus, rather than a run that refuses to start.
+// The only errors left are a manifest that is present and unreadable, and a
+// caller that supplied no corpus.
+func Resolve(dir, corpus string) (Set, error) {
+	if corpus == "" {
+		return Set{}, fmt.Errorf("%w for %s", ErrNoCorpus, dir)
+	}
+	root, err := filepath.Abs(dir)
 	if err != nil {
 		return Set{}, err
 	}
-	for cur := abs; ; {
-		found := map[string]Coord{}
-		for _, manifest := range Manifests() {
-			if _, err := os.Stat(filepath.Join(cur, manifest)); err != nil {
-				continue
-			}
-			c, err := ecosystems[manifest].From(cur)
-			if err != nil {
-				return Set{}, err
-			}
-			found[manifest] = c
+	found := map[string]Coord{}
+	for _, manifest := range Manifests() {
+		if _, err := os.Stat(filepath.Join(root, manifest)); err != nil {
+			continue
 		}
-		if len(found) > 0 {
-			// cur and not abs: the manifests' own directory is the repository
-			// root, so both kinds of entry resolve namespaces against the same
-			// base and an unknown ecosystem's files are namespaced exactly as a
-			// resolved one's would have been.
-			return newSet(cur, found), nil
+		c, err := ecosystems[manifest].From(root)
+		if err != nil {
+			return Set{}, err
 		}
-		parent := filepath.Dir(cur)
-		if parent == cur {
-			return Set{}, fmt.Errorf("%w at or above %s", ErrNoManifest, dir)
-		}
-		cur = parent
+		found[manifest] = c
 	}
+	return newSet(root, corpus, found), nil
 }
 
-// newSet spreads the coordinates read from one directory over the extensions
-// their ecosystems own, filling in the ecosystems that had no manifest there.
+// newSet spreads the coordinates read from the repository root over the
+// extensions their ecosystems own, filling in the ecosystems that declared no
+// manifest there.
 //
 // Manifest-name order is what makes Primary deterministic, and the iteration is
 // over the registry rather than over found so that the two kinds of entry are
 // produced by one loop and neither can be forgotten.
-func newSet(root string, found map[string]Coord) Set {
+//
+// A repository that declared nothing at all still has a Primary, and it is the
+// corpus with no ecosystem attached — `. . <corpus> .`. Leaving it zero would
+// make a report print `. . . .` for a repository whose name is the one thing
+// certainly known about it, and would make IsZero — which callers read as "the
+// run never got as far as resolving" — true of a run that resolved fine.
+func newSet(root, corpus string, found map[string]Coord) Set {
 	s := Set{ByExt: make(map[string]Coord, len(owner))}
 	for _, manifest := range Manifests() {
 		e := ecosystems[manifest]
 		c, ok := found[manifest]
 		switch {
 		case !ok:
-			c = e.unknown(root)
+			c = e.named(root, corpus)
 		case s.Primary.IsZero():
 			s.Primary = c
 		}
 		for _, ext := range e.Exts {
 			s.ByExt[ext] = c
 		}
+	}
+	if s.Primary.IsZero() {
+		s.Primary = Coord{Name: corpus, Version: Unknown, Root: root}
 	}
 	return s
 }

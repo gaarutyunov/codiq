@@ -170,7 +170,24 @@ const queuePollInterval = 10 * time.Millisecond
 // the zero Coord, and the batch would write a whole repository of descriptors
 // reading `. . . .`. That is the same silent-wrong-index outcome `-3` exists to
 // make unreachable, so `-4` does the same for the runs `-3` left behind.
-const WorkflowVersion = "codiq-index-4"
+//
+// The corpus milestone moves it to `-5`, and this time the *input* changed as
+// well as the step outputs: the workflow took a bare path and now takes a
+// Request, the resolve step's site carries a Corpus, and a map task's fileRef
+// carries one too. Every one of those is a JSON object gaining or changing a
+// field, so a `-4` checkpoint replayed against this code would once again not
+// fail — it would decode with `corpus` absent and index a whole repository
+// under the empty corpus, colliding with every other repository that did the
+// same and, worse, sitting in the database as rows that no `-corpus` query
+// finds. Since the corpus is half of file identity, checkpoints written before
+// it existed describe rows the new identity cannot place, so they have to be
+// unreachable rather than merely unlikely.
+//
+// The price is the same one `-3` and `-4` paid, and for the same reason: an
+// in-flight `-4` run stays PENDING until somebody runs the old build or clears
+// it. The alternative is not "that run finishes", it is "that run finishes into
+// the wrong corpus".
+const WorkflowVersion = "codiq-index-5"
 
 // RunIDPrefix is the prefix shared by the workflow IDs of every index of target,
 // which must be an absolute path. NewRunID mints one; a caller finds an
@@ -294,16 +311,33 @@ func Register(ctx dbos.DBOSContext, db DB, art *artifact.Store) error {
 	return nil
 }
 
-// IndexRepo indexes the repository rooted at repo as a durable map-reduce batch
+// Request is one index run's input: which tree to index, and what to call it in
+// a database that holds several.
+//
+// A struct rather than the bare path the workflow used to take, because a
+// workflow's input is recorded and replayed and the corpus has to be replayed
+// with it. Making it package state instead would mean a recovering process
+// resuming somebody else's run under whatever corpus its own flags named.
+type Request struct {
+	// Repo is the repository to index, absolute (see cmd/codiq).
+	Repo string `json:"repo"`
+	// Corpus is the name the repository is indexed under: half of every file
+	// row's identity, and the name of every coordinate the repository declares
+	// no manifest for.
+	Corpus string `json:"corpus"`
+}
+
+// IndexRepo indexes the repository named by req as a durable map-reduce batch
 // (SPEC.md §14 M4). It is index.Run's behaviour, checkpointed and batched.
 //
 // The result is the same Result Run returns, and is itself checkpointed, so a
 // caller that attaches to a workflow it did not start gets the same report as
-// the caller that started it.
+// the caller that started it — including which corpus that run wrote under,
+// which need not be the one the attaching process was invoked with.
 //
 // It must stay a top-level function: DBOS identifies a workflow by its code
 // pointer (see this file's package comment).
-func IndexRepo(ctx dbos.DBOSContext, repo string) (Result, error) {
+func IndexRepo(ctx dbos.DBOSContext, req Request) (Result, error) {
 	reg := registered.Load()
 	if reg == nil {
 		// Reachable only from a caller that registered the workflow by hand
@@ -311,17 +345,26 @@ func IndexRepo(ctx dbos.DBOSContext, repo string) (Result, error) {
 		// both halves.
 		return Result{}, errors.New("index: IndexRepo ran before index.Register")
 	}
-	return reg.indexRepo(ctx, repo)
+	return reg.indexRepo(ctx, req)
 }
 
 // site is what resolving the repository establishes once, before any file is
-// read: where the tree is and what coordinates its files belong to.
+// read: where the tree is, what it is called in the graph, and what coordinates
+// its files belong to.
 //
 // It is a step's output, so it is checkpointed — which is the point. Root is
 // derived from the process's working directory, and a recovering process need
 // not have the same one; taking Root from the checkpoint rather than resolving
 // it again means the resumed half of a run indexes the same tree as the first
 // half, under the same coordinates, or fails loudly because the tree is gone.
+//
+// Corpus is here for exactly that reason and not merely for tidiness. It is
+// half of every file row's identity and it is baked into the coordinates below,
+// so a process that resumes a run with a different -corpus must not write the
+// second half of the batch under the second name — that would split one
+// repository across two corpora, with the artifacts of the first half naming
+// one and the rows of the second half naming the other. The checkpoint wins; the
+// flag only ever names a *new* run.
 //
 // Coords and not Coord: a repository holding a go.mod beside a package.json has
 // one coordinate per ecosystem, and each file is stamped with its own language's
@@ -330,12 +373,13 @@ func IndexRepo(ctx dbos.DBOSContext, repo string) (Result, error) {
 // two properties a replayed step's output has to have.
 type site struct {
 	Root   string    `json:"root"`
+	Corpus string    `json:"corpus"`
 	Coords coord.Set `json:"coords"`
 }
 
-func (reg *registration) indexRepo(ctx dbos.DBOSContext, repo string) (Result, error) {
+func (reg *registration) indexRepo(ctx dbos.DBOSContext, req Request) (Result, error) {
 	s, err := dbos.RunAsStep(ctx, func(context.Context) (site, error) {
-		return resolve(repo)
+		return resolve(req)
 	}, dbos.WithStepName("resolve"))
 	if err != nil {
 		return Result{}, err
@@ -351,10 +395,12 @@ func (reg *registration) indexRepo(ctx dbos.DBOSContext, repo string) (Result, e
 		return walkRelative(s.Root)
 	}, dbos.WithStepName("walk"))
 	if err != nil {
-		return Result{}, fmt.Errorf("index: walk %s: %w", repo, err)
+		return Result{}, fmt.Errorf("index: walk %s: %w", req.Repo, err)
 	}
 
-	res := Result{Coord: s.Coords.Primary, Coords: s.Coords, Files: len(paths), Concurrency: reg.l.limit}
+	// The corpus is read back off the checkpoint rather than off req, so a
+	// resumed run reports and writes the name its first half used (see site).
+	res := Result{Corpus: s.Corpus, Coord: s.Coords.Primary, Coords: s.Coords, Files: len(paths), Concurrency: reg.l.limit}
 
 	keys, skipped, err := reg.mapFiles(ctx, s, paths)
 	// The skips are reported even when the map phase failed outright: they are
@@ -402,6 +448,12 @@ func (reg *registration) indexRepo(ctx dbos.DBOSContext, repo string) (Result, e
 type fileRef struct {
 	// Root is the absolute repository root, as the resolve step froze it.
 	Root string `json:"root"`
+	// Corpus is the name the run is indexing under, as the resolve step froze
+	// it. It travels with Path because the two together are the file's identity,
+	// and it is written into the artifact so the reduce loads the row under the
+	// corpus the facts were extracted under rather than the one the reducing
+	// process was given.
+	Corpus string `json:"corpus"`
 	// Path is repo-relative and slash-separated, as the `file` table stores it.
 	Path string `json:"path"`
 	// Coord is the package coordinate every symbol in the file is prefixed with:
@@ -487,7 +539,7 @@ func (reg *registration) extract(ctx dbos.DBOSContext, ref fileRef) (extracted, 
 	// artifact key is computed over.
 	path := filepath.Join(ref.Root, filepath.FromSlash(ref.Path))
 	return dbos.RunAsStep(ctx, func(sctx context.Context) (extracted, error) {
-		ff, err := reg.l.extract(ref.Root, path, ref.Coord)
+		ff, err := reg.l.extract(ref.Root, path, ref.Corpus, ref.Coord)
 		if err != nil {
 			return extracted{}, err
 		}
@@ -556,7 +608,7 @@ func (reg *registration) mapFiles(ctx dbos.DBOSContext, s site, paths []string) 
 	handles := make([]dbos.WorkflowHandle[extracted], 0, len(paths))
 	for _, rel := range paths {
 		h, err := dbos.RunWorkflow(ctx, extractFile,
-			fileRef{Root: s.Root, Path: rel, Coord: s.Coords.For(rel)},
+			fileRef{Root: s.Root, Corpus: s.Corpus, Path: rel, Coord: s.Coords.For(rel)},
 			dbos.WithQueue(QueueName))
 		if err != nil {
 			return nil, nil, fmt.Errorf("index: enqueue %s: %w", rel, err)
@@ -696,16 +748,16 @@ func (reg *registration) reviveCancelled(handles []dbos.WorkflowHandle[extracted
 // thing. Once per run and one per ecosystem are not in tension — coord.Resolve
 // reads every registered manifest from one directory, so the whole set costs the
 // one upward search a single coordinate used to.
-func resolve(repo string) (site, error) {
-	root, err := filepath.Abs(repo)
+func resolve(req Request) (site, error) {
+	root, err := filepath.Abs(req.Repo)
 	if err != nil {
-		return site{}, fmt.Errorf("index: %s: %w", repo, err)
+		return site{}, fmt.Errorf("index: %s: %w", req.Repo, err)
 	}
-	coords, err := coord.Resolve(root)
+	coords, err := coord.Resolve(root, req.Corpus)
 	if err != nil {
 		return site{}, fmt.Errorf("index: %w", err)
 	}
-	return site{Root: root, Coords: coords}, nil
+	return site{Root: root, Corpus: req.Corpus, Coords: coords}, nil
 }
 
 // walkRelative is walk, with its paths rendered the way the `file` table renders

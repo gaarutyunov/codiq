@@ -81,11 +81,10 @@ const (
 // an invented one would join.
 //
 // And, as cmake.go recorded for C: a Kotlin repository with neither a
-// `settings.gradle.kts` nor any other language's manifest resolves to
-// ErrNoManifest and does not index at all. The fix is a last-resort coordinate in
-// the shared `Resolve`, which is a change to the core §14 M9+ says an
-// additional-language task must not make. It is recorded here so the next reader
-// finds it stated rather than discovers it as a bug.
+// `settings.gradle.kts` nor any other language's manifest used to fail the run
+// and not index at all. The corpus milestone is the last-resort coordinate that
+// answers it — such a repository resolves to `scip-kotlin gradle <corpus> .`
+// rooted at itself, so it indexes and carries the corpus for a package name.
 const SettingsFile = "settings.gradle.kts"
 
 // KotlinExts are the file extensions this ecosystem owns.

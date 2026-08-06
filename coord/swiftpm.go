@@ -75,13 +75,13 @@ const (
 // never false-match (§4.3); an invented one would join.
 //
 // And, as cmake.go recorded for C and gradle.go for Kotlin: a Swift repository
-// with neither a `Package.swift` nor any other language's manifest resolves to
-// ErrNoManifest and does not index at all. An Xcode project is exactly that
-// repository — `.xcodeproj` is a directory of XML this resolver does not read —
-// so an app that has never adopted SwiftPM is out of scope. The fix is a
-// last-resort coordinate in the shared `Resolve`, which is a change to the core
-// §14 M9+ says an additional-language task must not make. It is recorded here so
-// the next reader finds it stated rather than discovers it as a bug.
+// with neither a `Package.swift` nor any other language's manifest used to fail
+// the run and not index at all. An Xcode project is exactly that repository —
+// `.xcodeproj` is a directory of XML this resolver does not read. The corpus
+// milestone is the last-resort coordinate that answers it: such a repository
+// resolves to `scip-swift swiftpm <corpus> .` rooted at itself, so an app that
+// has never adopted SwiftPM now indexes, carrying the corpus for a package name
+// rather than a SwiftPM one.
 const PackageManifest = "Package.swift"
 
 // SwiftExt is the file extension this ecosystem owns.

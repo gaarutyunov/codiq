@@ -60,10 +60,30 @@
 type File @node(label: "file", table: "file") {
   id: ID!
 
-  # Repo-relative path. Indexed rather than UNIQUE on purpose: uniqueness of a
-  # path is a property of a *corpus*, and the corpus boundary is not modelled in
-  # M1. Promote to `@key(fields: ["path"])` once one exists — that also makes a
-  # file selectable by path in a MATCH.
+  # The repository this file belongs to, named by the indexing run
+  # (`codiq -corpus`). One database holds many repositories, and a file's
+  # identity is `(corpus, path)` — `src/main.go` is a path most repositories
+  # have, and without this column two of them would be one row.
+  #
+  # It is not only the file row's business. The same name reaches the
+  # *descriptor*, because an ecosystem a repository declares no manifest for is
+  # coordinate-named after its corpus (coord.Resolve); the link pass joins on
+  # the descriptor and nothing else (§7), so a corpus that stopped at this
+  # column would keep the rows apart and still link them together.
+  #
+  # Indexed rather than partitioned on: the corpus is a filter, and a btree over
+  # a low-cardinality column is what makes `WHERE corpus = $1` a scan of one
+  # repository's rows.
+  corpus: String! @index(name: "file_corpus_idx", using: "btree")
+
+  # Repo-relative path. Indexed rather than UNIQUE on purpose, and the reason has
+  # narrowed: uniqueness of a path is a property of a *corpus*, and a corpus now
+  # exists, so `@key(fields: ["corpus", "path"])` is expressible for the first
+  # time. It is deliberately not taken here — the loader's advisory lock already
+  # makes its select-then-insert race-free, and swapping it for `ON CONFLICT` is
+  # a load-path optimisation with no correctness argument behind it (SPEC.md §16).
+  # What the corpus column does buy today is that the pair is *unique in
+  # practice*: one run writes one corpus, and a path appears once in a walk.
   path: String! @index(name: "file_path_idx", using: "btree")
 
   # Extractor language tag ("go", "typescript", …). Chooses the stanza set.

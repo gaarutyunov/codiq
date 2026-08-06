@@ -155,7 +155,17 @@ func (d Descriptor) String() string {
 // File is the one file a FileFacts describes: a row in `file`. It carries no
 // id — the store assigns the uuid — and its coordinate supplies the four
 // pkg_* columns.
+//
+// Its identity is (Corpus, Path) and not Path. One database holds many
+// repositories, and `src/main.go` is a path most of them have.
 type File struct {
+	// Corpus is the repository this file belongs to, as the run was invoked
+	// (index.Request). With Path it is the file's identity: the store resolves
+	// the row on the pair, and two corpora's same-named files are two rows.
+	//
+	// It is set by index and not by an extractor: a file's bytes cannot know
+	// what the repository around them is called.
+	Corpus string
 	// Path is repo-relative.
 	Path string
 	// Lang is the extractor language tag, e.g. "go".
